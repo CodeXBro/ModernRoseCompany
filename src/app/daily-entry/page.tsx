@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 interface Branch {
   _id: string;
@@ -29,7 +29,23 @@ export default function DailyEntryPage() {
   const [entries, setEntries] = useState<DailyEntry[]>([]);
 
   const [branchId, setBranchId] = useState("");
-  const [date, setDate] = useState("2026-09-29");
+  const [assignedBranchId, setAssignedBranchId] = useState("");
+  const [userRole, setUserRole] = useState("");
+  const [sessionLoaded, setSessionLoaded] = useState(false);
+
+  const [date, setDate] = useState(() => {
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Dubai",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).formatToParts(new Date());
+
+    const part = (type: string) =>
+      parts.find((item) => item.type === type)?.value ?? "";
+
+    return `${part("year")}-${part("month")}-${part("day")}`;
+  });
 
   const [cash, setCash] = useState("");
   const [visa, setVisa] = useState("");
@@ -40,46 +56,96 @@ export default function DailyEntryPage() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
-  const ownerId = "6abbb773907472cc5ac6f063";
-
-  async function fetchBranches() {
+  const fetchEntries = useCallback(async () => {
     try {
-      const response = await fetch("/api/branches");
-      const data = await response.json();
+      const response = await fetch("/api/daily-entries", {
+        cache: "no-store",
+      });
+      const result = await response.json();
 
-      if (data.success) {
-        const activeBranches = data.branches.filter(
-          (branch: Branch) => branch.isActive,
-        );
-
-        setBranches(activeBranches);
-
-        if (activeBranches.length > 0 && !branchId) {
-          setBranchId(activeBranches[0]._id);
-        }
-      }
-    } catch (error) {
-      console.error("Error fetching branches:", error);
-    }
-  }
-
-  async function fetchEntries() {
-    try {
-      const response = await fetch("/api/daily-entries");
-      const data = await response.json();
-
-      if (data.success) {
-        setEntries(data.entries);
+      if (response.ok && result.success) {
+        setEntries(result.entries);
+      } else {
+        console.error(result.message || "Failed to load daily entries");
       }
     } catch (error) {
       console.error("Error fetching daily entries:", error);
     }
-  }
+  }, []);
 
   useEffect(() => {
-    fetchBranches();
-    fetchEntries();
-  }, []);
+    let active = true;
+
+    async function initializePage() {
+      try {
+        const sessionResponse = await fetch("/api/auth/session", {
+          cache: "no-store",
+        });
+
+        const session = await sessionResponse.json();
+
+        if (!active) return;
+
+        const role = session?.user?.role ?? "";
+        const assignedId = session?.user?.branchId ?? "";
+
+        setUserRole(role);
+        setAssignedBranchId(assignedId);
+
+        if (role === "employee") {
+          if (!assignedId) {
+            console.error("Employee has no assigned branch.");
+            return;
+          }
+
+          // Employees always use their assigned branch.
+          setBranchId(assignedId);
+        }
+
+        const branchResponse = await fetch("/api/branches", {
+          cache: "no-store",
+        });
+        const branchResult = await branchResponse.json();
+
+        if (!active) return;
+
+        if (branchResponse.ok && branchResult.success) {
+          const activeBranches: Branch[] = branchResult.branches.filter(
+            (branch: Branch) => branch.isActive,
+          );
+
+          setBranches(activeBranches);
+
+          if (role !== "employee") {
+            setBranchId((current) => {
+              if (
+                current &&
+                activeBranches.some((branch) => branch._id === current)
+              ) {
+                return current;
+              }
+
+              return activeBranches[0]?._id ?? "";
+            });
+          }
+        }
+
+        await fetchEntries();
+      } catch (error) {
+        console.error("Error initializing Daily Entry:", error);
+      } finally {
+        if (active) {
+          setSessionLoaded(true);
+        }
+      }
+    }
+
+    initializePage();
+
+    return () => {
+      active = false;
+    };
+  }, [fetchEntries]);
 
   const totalIncome =
     Number(cash || 0) +
@@ -94,41 +160,48 @@ export default function DailyEntryPage() {
     setOnline("");
     setOther("");
     setNotes("");
+
+    // Keep the employee assigned to their own branch.
+    if (userRole === "employee") {
+      setBranchId(assignedBranchId);
+    }
   }
 
   function handleEdit(entry: DailyEntry) {
+    if (userRole === "employee" && entry.branchId._id !== assignedBranchId) {
+      alert("You can only edit entries for your assigned branch.");
+      return;
+    }
+
     setEditingId(entry._id);
 
-    setBranchId(entry.branchId._id);
+    if (userRole !== "employee") {
+      setBranchId(entry.branchId._id);
+    }
 
     setDate(new Date(entry.date).toISOString().split("T")[0]);
-
     setCash(String(entry.income.cash));
     setVisa(String(entry.income.visa));
     setOnline(String(entry.income.online));
     setOther(String(entry.income.other));
     setNotes(entry.notes || "");
 
-    window.scrollTo({
-      top: 0,
-      behavior: "smooth",
-    });
+    window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
-  function handleCancelEdit() {
-    resetForm();
-  }
-
-  async function handleSubmit(event: React.FormEvent) {
+  async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
-    if (!branchId) {
-      alert("Please select a branch");
+    const effectiveBranchId =
+      userRole === "employee" ? assignedBranchId : branchId;
+
+    if (!effectiveBranchId) {
+      alert("No branch is selected or assigned.");
       return;
     }
 
     if (!date) {
-      alert("Please select a date");
+      alert("Please select a date.");
       return;
     }
 
@@ -139,47 +212,65 @@ export default function DailyEntryPage() {
         ? `/api/daily-entries/${editingId}`
         : "/api/daily-entries";
 
-      const method = editingId ? "PUT" : "POST";
-
       const response = await fetch(url, {
-        method,
-        headers: {
-          "Content-Type": "application/json",
-        },
+        method: editingId ? "PUT" : "POST",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          branchId,
+          branchId: effectiveBranchId,
           date,
           cash,
           visa,
           online,
           other,
           notes,
-          ...(editingId ? {} : { createdBy: ownerId }),
         }),
       });
 
-      const data = await response.json();
+      const result = await response.json();
 
       if (!response.ok) {
-        alert(data.message || "Failed to save daily entry");
+        alert(result.message || "Failed to save daily entry.");
         return;
       }
 
       alert(
         editingId
-          ? "Daily entry updated successfully"
-          : "Daily entry saved successfully",
+          ? "Daily entry updated successfully."
+          : "Daily entry saved successfully.",
       );
 
       resetForm();
-
       await fetchEntries();
     } catch (error) {
       console.error("Error saving daily entry:", error);
-      alert("Something went wrong");
+      alert("Something went wrong.");
     } finally {
       setLoading(false);
     }
+  }
+
+  if (!sessionLoaded) {
+    return (
+      <main className="min-h-screen bg-[#f7f7f8] p-8">
+        Loading your account...
+      </main>
+    );
+  }
+
+  if (!userRole) {
+    return (
+      <main className="min-h-screen bg-[#f7f7f8] p-8">
+        Your session could not be loaded. Please log in again.
+      </main>
+    );
+  }
+
+  if (userRole === "employee" && !assignedBranchId) {
+    return (
+      <main className="min-h-screen bg-[#f7f7f8] p-8">
+        Your account has no assigned branch. Please contact the administrator.
+      </main>
+    );
   }
 
   return (
@@ -187,7 +278,6 @@ export default function DailyEntryPage() {
       <div className="mx-auto max-w-6xl">
         <div className="mb-8">
           <h1 className="text-3xl font-bold text-[#253d2f]">Daily Entry</h1>
-
           <p className="mt-1 text-gray-500">Record daily branch income</p>
         </div>
 
@@ -198,96 +288,69 @@ export default function DailyEntryPage() {
             </h2>
 
             <form onSubmit={handleSubmit} className="space-y-4">
-              <div>
-                <label className="mb-1 block text-sm font-medium">Branch</label>
+              {userRole !== "employee" && (
+                <div>
+                  <label className="mb-1 block text-sm font-medium">
+                    Branch
+                  </label>
 
-                <select
-                  value={branchId}
-                  onChange={(event) => setBranchId(event.target.value)}
-                  className="w-full rounded-lg border border-gray-300 px-4 py-3"
-                >
-                  <option value="">Select Branch</option>
+                  <select
+                    value={branchId}
+                    onChange={(event) => setBranchId(event.target.value)}
+                    required
+                    className="w-full rounded-lg border border-gray-300 px-4 py-3"
+                  >
+                    <option value="">Select Branch</option>
+                    {branches.map((branch) => (
+                      <option key={branch._id} value={branch._id}>
+                        {branch.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
 
-                  {branches.map((branch) => (
-                    <option key={branch._id} value={branch._id}>
-                      {branch.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
+              {userRole === "employee" && (
+                <div className="rounded-lg bg-[#eef4f0] p-3 text-sm text-[#253d2f]">
+                  Branch is automatically set to your assigned branch.
+                </div>
+              )}
 
               <div>
                 <label className="mb-1 block text-sm font-medium">Date</label>
-
                 <input
                   type="date"
                   value={date}
                   onChange={(event) => setDate(event.target.value)}
+                  required
                   className="w-full rounded-lg border border-gray-300 px-4 py-3"
                 />
               </div>
 
-              <div>
-                <label className="mb-1 block text-sm font-medium">Cash</label>
-
-                <input
-                  type="number"
-                  min="0"
-                  step="0.01"
-                  value={cash}
-                  onChange={(event) => setCash(event.target.value)}
-                  placeholder="0.00"
-                  className="w-full rounded-lg border border-gray-300 px-4 py-3"
-                />
-              </div>
-
-              <div>
-                <label className="mb-1 block text-sm font-medium">
-                  Visa Machine
-                </label>
-
-                <input
-                  type="number"
-                  min="0"
-                  step="0.01"
-                  value={visa}
-                  onChange={(event) => setVisa(event.target.value)}
-                  placeholder="0.00"
-                  className="w-full rounded-lg border border-gray-300 px-4 py-3"
-                />
-              </div>
-
-              <div>
-                <label className="mb-1 block text-sm font-medium">Online</label>
-
-                <input
-                  type="number"
-                  min="0"
-                  step="0.01"
-                  value={online}
-                  onChange={(event) => setOnline(event.target.value)}
-                  placeholder="0.00"
-                  className="w-full rounded-lg border border-gray-300 px-4 py-3"
-                />
-              </div>
-
-              <div>
-                <label className="mb-1 block text-sm font-medium">Other</label>
-
-                <input
-                  type="number"
-                  min="0"
-                  step="0.01"
-                  value={other}
-                  onChange={(event) => setOther(event.target.value)}
-                  placeholder="0.00"
-                  className="w-full rounded-lg border border-gray-300 px-4 py-3"
-                />
-              </div>
+              {[
+                { label: "Cash", value: cash, setter: setCash },
+                { label: "Visa Machine", value: visa, setter: setVisa },
+                { label: "Online", value: online, setter: setOnline },
+                { label: "Other", value: other, setter: setOther },
+              ].map((field) => (
+                <div key={field.label}>
+                  <label className="mb-1 block text-sm font-medium">
+                    {field.label}
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={field.value}
+                    onChange={(event) => field.setter(event.target.value)}
+                    placeholder="0.00"
+                    className="w-full rounded-lg border border-gray-300 px-4 py-3"
+                  />
+                </div>
+              ))}
 
               <div>
                 <label className="mb-1 block text-sm font-medium">Notes</label>
-
                 <textarea
                   value={notes}
                   onChange={(event) => setNotes(event.target.value)}
@@ -302,7 +365,6 @@ export default function DailyEntryPage() {
                   <span className="font-medium text-gray-700">
                     Total Income
                   </span>
-
                   <span className="text-xl font-bold text-[#253d2f]">
                     AED {totalIncome.toFixed(2)}
                   </span>
@@ -312,7 +374,7 @@ export default function DailyEntryPage() {
               <div className="flex gap-3">
                 <button
                   type="submit"
-                  disabled={loading}
+                  disabled={loading || !branchId}
                   className="flex-1 rounded-lg bg-[#253d2f] px-4 py-3 font-medium text-white disabled:opacity-50"
                 >
                   {loading
@@ -325,7 +387,7 @@ export default function DailyEntryPage() {
                 {editingId && (
                   <button
                     type="button"
-                    onClick={handleCancelEdit}
+                    onClick={resetForm}
                     className="rounded-lg border border-gray-300 px-4 py-3 font-medium text-gray-700"
                   >
                     Cancel
@@ -361,7 +423,6 @@ export default function DailyEntryPage() {
                           <h3 className="font-semibold">
                             {entry.branchId.name}
                           </h3>
-
                           <p className="text-sm text-gray-500">
                             {new Date(entry.date).toLocaleDateString()}
                           </p>
@@ -384,13 +445,10 @@ export default function DailyEntryPage() {
 
                       <div className="mt-3 grid grid-cols-2 gap-2 text-sm text-gray-500">
                         <span>Cash: AED {entry.income.cash.toFixed(2)}</span>
-
                         <span>Visa: AED {entry.income.visa.toFixed(2)}</span>
-
                         <span>
                           Online: AED {entry.income.online.toFixed(2)}
                         </span>
-
                         <span>Other: AED {entry.income.other.toFixed(2)}</span>
                       </div>
                     </div>

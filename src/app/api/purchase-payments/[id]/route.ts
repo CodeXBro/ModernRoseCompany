@@ -3,7 +3,8 @@ import connectDB from "@/lib/mongodb";
 import FlowerPurchase from "@/models/FlowerPurchase";
 import "@/models/Company";
 import "@/models/Branch";
-import { requireAuth, requireWriteAccess } from "@/lib/permissions";
+import { requireWriteAccess, applyBranchAccess } from "@/lib/permissions";
+
 function calculatePayment(totalAmount: number, paidAmount: number) {
   if (paidAmount < 0) {
     throw new Error("Paid amount cannot be negative.");
@@ -39,10 +40,41 @@ export async function PUT(
   },
 ) {
   try {
-    await requireWriteAccess();
+    const user = await requireWriteAccess();
+
     await connectDB();
 
     const { id } = await context.params;
+
+    const purchase = await FlowerPurchase.findById(id);
+
+    if (!purchase) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: "Purchase bill not found.",
+        },
+        { status: 404 },
+      );
+    }
+
+    // Employees can only update payments
+    // for purchases in their assigned branch.
+    if (user.role === "employee") {
+      const filter: Record<string, unknown> = {};
+
+      applyBranchAccess(user, filter);
+
+      if (purchase.branchId.toString() !== String(filter.branchId)) {
+        return NextResponse.json(
+          {
+            success: false,
+            message: "You can only update payments for your assigned branch.",
+          },
+          { status: 403 },
+        );
+      }
+    }
 
     const body = await request.json();
 
@@ -55,18 +87,6 @@ export async function PUT(
           message: "Please enter a valid paid amount.",
         },
         { status: 400 },
-      );
-    }
-
-    const purchase = await FlowerPurchase.findById(id);
-
-    if (!purchase) {
-      return NextResponse.json(
-        {
-          success: false,
-          message: "Purchase bill not found.",
-        },
-        { status: 404 },
       );
     }
 

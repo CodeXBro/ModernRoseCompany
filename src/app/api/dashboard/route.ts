@@ -1,244 +1,284 @@
-
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import connectDB from "@/lib/mongodb";
 import Branch from "@/models/Branch";
 import DailyEntry from "@/models/DailyEntry";
 import Expense from "@/models/Expense";
 import FlowerPurchase from "@/models/FlowerPurchase";
-import { requireAuth } from "@/lib/permissions";
+import { requireAuth, applyBranchAccess } from "@/lib/permissions";
 
-export async function GET(request: Request) {
+export const dynamic = "force-dynamic";
+
+function getUaeDate() {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Dubai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+
+  const values = Object.fromEntries(
+    parts.map((part) => [part.type, part.value]),
+  );
+
+  return `${values.year}-${values.month}-${values.day}`;
+}
+
+function money(value: unknown): number {
+  const result = Number(value ?? 0);
+  return Number.isFinite(result) ? result : 0;
+}
+
+function idOf(value: unknown): string {
+  if (!value) return "";
+  if (typeof value === "object" && value !== null && "_id" in value) {
+    return String((value as { _id: unknown })._id);
+  }
+  return String(value);
+}
+
+export async function GET(request: NextRequest) {
   try {
-    await requireAuth();
     await connectDB();
 
-    const { searchParams } = new URL(request.url);
+    const user = await requireAuth();
+    const params = request.nextUrl.searchParams;
 
-    const date =
-      searchParams.get("date") ||
-      new Date().toISOString().split("T")[0];
+    const mode = params.get("mode") === "day" ? "day" : "month";
+    const selectedDate = params.get("date") || getUaeDate();
+    const requestedBranchId = params.get("branchId") || "";
 
-    const branchId = searchParams.get("branchId");
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(selectedDate)) {
+      return NextResponse.json(
+        { success: false, message: "Invalid date." },
+        { status: 400 },
+      );
+    }
 
-    const startDate = new Date(
-      `${date}T00:00:00`,
-    );
+    const [year, month, day] = selectedDate.split("-").map(Number);
+    const validationDate = new Date(Date.UTC(year, month - 1, day));
 
-    const endDate = new Date(
-      `${date}T23:59:59.999`,
-    );
+    if (
+      validationDate.getUTCFullYear() !== year ||
+      validationDate.getUTCMonth() !== month - 1 ||
+      validationDate.getUTCDate() !== day
+    ) {
+      return NextResponse.json(
+        { success: false, message: "Invalid date." },
+        { status: 400 },
+      );
+    }
 
-    const branchFilter = branchId
-      ? { branchId }
-      : {};
+    // Daily mode: selected day only.
+    // Monthly mode: the entire month containing the selected date.
+    const startDate =
+      mode === "day"
+        ? new Date(Date.UTC(year, month - 1, day))
+        : new Date(Date.UTC(year, month - 1, 1));
 
-    /*
-     * Get today's data
-     */
-    const dailyEntries =
-      await DailyEntry.find({
-        date: {
-          $gte: startDate,
-          $lte: endDate,
-        },
-        ...branchFilter,
-      }).lean();
+    const endDate =
+      mode === "day"
+        ? new Date(Date.UTC(year, month - 1, day + 1))
+        : new Date(Date.UTC(year, month, 1));
 
-    const expenses =
-      await Expense.find({
-        date: {
-          $gte: startDate,
-          $lte: endDate,
-        },
-        ...branchFilter,
-      }).lean();
+    const branchFilter: Record<string, unknown> = {};
 
-    const flowerPurchases =
-      await FlowerPurchase.find({
-        date: {
-          $gte: startDate,
-          $lte: endDate,
-        },
-        ...branchFilter,
-      }).lean();
+    if (requestedBranchId) {
+      branchFilter.branchId = requestedBranchId;
+    }
 
-    /*
-     * Calculate total income
-     */
-    let cash = 0;
-    let visa = 0;
-    let online = 0;
-    let other = 0;
+    // Employees are always restricted to their assigned branch.
+    applyBranchAccess(user, branchFilter);
+
+    const dateFilter = {
+      date: {
+        $gte: startDate,
+        $lt: endDate,
+      },
+    };
+
+    const [dailyEntries, expenses, purchases, branchDocuments] =
+      await Promise.all([
+        DailyEntry.find({ ...dateFilter, ...branchFilter }).lean(),
+        Expense.find({ ...dateFilter, ...branchFilter }).lean(),
+        FlowerPurchase.find({ ...dateFilter, ...branchFilter }).lean(),
+        Branch.find({
+          isActive: true,
+          ...(user.role === "employee"
+            ? { _id: user.branchId }
+            : requestedBranchId
+              ? { _id: requestedBranchId }
+              : {}),
+        }).lean(),
+      ]);
+
+    const totals = {
+      cash: 0,
+      visa: 0,
+      online: 0,
+      other: 0,
+      general: 0,
+      flowerPurchases: 0,
+    };
+
+    type BranchTotals = {
+      branchId: string;
+      branchName: string;
+      cash: number;
+      visa: number;
+      online: number;
+      other: number;
+      generalExpenses: number;
+      flowerPurchases: number;
+    };
+
+    const branchTotals = new Map<string, BranchTotals>();
+
+    for (const branch of branchDocuments) {
+      const branchId = String(branch._id);
+
+      branchTotals.set(branchId, {
+        branchId,
+        branchName: branch.name,
+        cash: 0,
+        visa: 0,
+        online: 0,
+        other: 0,
+        generalExpenses: 0,
+        flowerPurchases: 0,
+      });
+    }
+
+    function getBranch(branchIdValue: unknown): BranchTotals | undefined {
+      const branchId = idOf(branchIdValue);
+
+      // Never create or return a branch outside the permitted branch list.
+      return branchTotals.get(branchId);
+    }
 
     for (const entry of dailyEntries) {
-      cash += entry.income.cash;
-      visa += entry.income.visa;
-      online += entry.income.online;
-      other += entry.income.other;
+      const branch = getBranch(entry.branchId);
+      if (!branch) continue;
+
+      const income = entry.income as
+        | {
+            cash?: number;
+            visa?: number;
+            online?: number;
+            other?: number;
+          }
+        | undefined;
+
+      const cash = money(income?.cash);
+      const visa = money(income?.visa);
+      const online = money(income?.online);
+      const other = money(income?.other);
+
+      branch.cash += cash;
+      branch.visa += visa;
+      branch.online += online;
+      branch.other += other;
+
+      totals.cash += cash;
+      totals.visa += visa;
+      totals.online += online;
+      totals.other += other;
     }
-
-    const totalIncome =
-      cash +
-      visa +
-      online +
-      other;
-
-    /*
-     * Calculate general expenses
-     */
-    let generalExpenses = 0;
 
     for (const expense of expenses) {
-      generalExpenses += expense.amount;
+      const branch = getBranch(expense.branchId);
+      if (!branch) continue;
+
+      const amount = money(expense.amount);
+
+      branch.generalExpenses += amount;
+      totals.general += amount;
     }
 
-    /*
-     * Calculate flower purchases
-     */
-    let flowerPurchaseTotal = 0;
+    for (const purchase of purchases) {
+      const branch = getBranch(purchase.branchId);
+      if (!branch) continue;
 
-    for (const purchase of flowerPurchases) {
-      flowerPurchaseTotal +=
-        purchase.totalAmount;
+      const amount = money(purchase.totalAmount);
+
+      branch.flowerPurchases += amount;
+      totals.flowerPurchases += amount;
     }
 
-    const totalExpenses =
-      generalExpenses +
-      flowerPurchaseTotal;
-
-    const netProfit =
-      totalIncome - totalExpenses;
-
-    /*
-     * Get active branches
-     */
-    const branches = await Branch.find({
-      isActive: true,
-    })
-      .sort({ name: 1 })
-      .lean();
-
-    /*
-     * Calculate performance for each branch
-     */
-    const branchPerformance = branches.map(
+    const branchPerformance = Array.from(branchTotals.values()).map(
       (branch) => {
-        const branchEntries =
-          dailyEntries.filter(
-            (entry) =>
-              entry.branchId.toString() ===
-              branch._id.toString(),
-          );
+        const income = branch.cash + branch.visa + branch.online + branch.other;
 
-        const branchExpenses =
-          expenses.filter(
-            (expense) =>
-              expense.branchId.toString() ===
-              branch._id.toString(),
-          );
-
-        const branchFlowerPurchases =
-          flowerPurchases.filter(
-            (purchase) =>
-              purchase.branchId.toString() ===
-              branch._id.toString(),
-          );
-
-        let branchCash = 0;
-        let branchVisa = 0;
-        let branchOnline = 0;
-        let branchOther = 0;
-
-        for (const entry of branchEntries) {
-          branchCash += entry.income.cash;
-          branchVisa += entry.income.visa;
-          branchOnline += entry.income.online;
-          branchOther += entry.income.other;
-        }
-
-        const branchIncome =
-          branchCash +
-          branchVisa +
-          branchOnline +
-          branchOther;
-
-        let branchGeneralExpenses = 0;
-
-        for (const expense of branchExpenses) {
-          branchGeneralExpenses +=
-            expense.amount;
-        }
-
-        let branchFlowerPurchaseTotal = 0;
-
-        for (
-          const purchase of branchFlowerPurchases
-        ) {
-          branchFlowerPurchaseTotal +=
-            purchase.totalAmount;
-        }
-
-        const branchTotalExpenses =
-          branchGeneralExpenses +
-          branchFlowerPurchaseTotal;
-
-        const branchProfit =
-          branchIncome -
-          branchTotalExpenses;
+        const expenses = branch.generalExpenses + branch.flowerPurchases;
 
         return {
-          branchId: branch._id.toString(),
-          branchName: branch.name,
-
-          income: branchIncome,
-
-          expenses: branchTotalExpenses,
-
-          profit: branchProfit,
+          branchId: branch.branchId,
+          branchName: branch.branchName,
+          cash: branch.cash,
+          visa: branch.visa,
+          online: branch.online,
+          other: branch.other,
+          income,
+          generalExpenses: branch.generalExpenses,
+          flowerPurchases: branch.flowerPurchases,
+          expenses,
+          profit: income - expenses,
         };
       },
     );
 
+    const totalIncome =
+      totals.cash + totals.visa + totals.online + totals.other;
+
+    const totalExpenses = totals.general + totals.flowerPurchases;
+
     return NextResponse.json({
       success: true,
-
       dashboard: {
-        date,
-
+        date: selectedDate,
+        mode,
+        period: {
+          startDate: startDate.toISOString(),
+          endDate: new Date(endDate.getTime() - 1).toISOString(),
+        },
         income: {
-          cash,
-          visa,
-          online,
-          other,
+          cash: totals.cash,
+          visa: totals.visa,
+          online: totals.online,
+          other: totals.other,
           total: totalIncome,
         },
-
         expenses: {
-          general: generalExpenses,
-          flowerPurchases:
-            flowerPurchaseTotal,
+          general: totals.general,
+          flowerPurchases: totals.flowerPurchases,
           total: totalExpenses,
         },
-
-        netProfit,
-
+        netProfit: totalIncome - totalExpenses,
         branchPerformance,
       },
     });
   } catch (error) {
-    console.error(
-      "Error loading dashboard:",
-      error,
-    );
+    console.error("Dashboard API error:", error);
+
+    const message =
+      error instanceof Error ? error.message : "Unable to load dashboard.";
+
+    if (message === "UNAUTHORIZED") {
+      return NextResponse.json(
+        { success: false, message: "Please log in." },
+        { status: 401 },
+      );
+    }
+
+    if (message === "FORBIDDEN") {
+      return NextResponse.json(
+        { success: false, message: "You do not have permission." },
+        { status: 403 },
+      );
+    }
 
     return NextResponse.json(
-      {
-        success: false,
-        message:
-          "Failed to load dashboard data",
-      },
+      { success: false, message: "Unable to load dashboard data." },
       { status: 500 },
     );
   }
 }
-

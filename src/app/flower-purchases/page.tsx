@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 interface Branch {
   _id: string;
@@ -17,20 +17,11 @@ interface Company {
 
 interface Purchase {
   _id: string;
-  branchId?:
-    | string
-    | {
-        _id: string;
-        name: string;
-      };
+  branchId?: string | { _id: string; name: string };
   date: string;
   companyId?:
     | string
-    | {
-        _id: string;
-        companyName: string;
-        supplierName: string;
-      };
+    | { _id: string; companyName: string; supplierName: string };
   supplierName?: string;
   invoiceNumber?: string;
   totalAmount?: number;
@@ -42,99 +33,151 @@ interface Purchase {
 }
 
 type PaymentStatus = "paid" | "pending" | "partial";
+type PaymentMethod = "cash" | "visa" | "online" | "bank" | "other";
+
+function getUaeDate() {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Dubai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+
+  const part = (type: string) =>
+    parts.find((item) => item.type === type)?.value ?? "";
+
+  return `${part("year")}-${part("month")}-${part("day")}`;
+}
 
 export default function FlowerPurchasesPage() {
   const [branches, setBranches] = useState<Branch[]>([]);
-
   const [companies, setCompanies] = useState<Company[]>([]);
-
   const [purchases, setPurchases] = useState<Purchase[]>([]);
 
   const [branchId, setBranchId] = useState("");
+  const [assignedBranchId, setAssignedBranchId] = useState("");
+  const [userRole, setUserRole] = useState("");
+  const [sessionLoaded, setSessionLoaded] = useState(false);
 
-  const [date, setDate] = useState("2026-09-30");
-
+  const [date, setDate] = useState(getUaeDate);
   const [companyId, setCompanyId] = useState("");
-
   const [supplierName, setSupplierName] = useState("");
-
   const [invoiceNumber, setInvoiceNumber] = useState("");
-
   const [totalAmount, setTotalAmount] = useState("");
-
   const [paymentStatus, setPaymentStatus] = useState<PaymentStatus>("pending");
-
-  const [paidAmount, setPaidAmount] = useState("");
-
-  const [paymentMethod, setPaymentMethod] = useState<
-    "cash" | "visa" | "online" | "bank" | "other"
-  >("bank");
-
+  const [paidAmount, setPaidAmount] = useState("0");
+  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>("bank");
   const [notes, setNotes] = useState("");
 
   const [editingId, setEditingId] = useState<string | null>(null);
-
   const [loading, setLoading] = useState(false);
-
   const [error, setError] = useState("");
 
-  const ownerId = "6abbb773907472cc5ac6f063";
-
-  useEffect(() => {
-    loadBranches();
-    loadCompanies();
-    loadPurchases();
-  }, []);
-
-  async function loadBranches() {
+  const loadCompanies = useCallback(async () => {
     try {
-      const response = await fetch("/api/branches");
-
+      const response = await fetch("/api/companies", {
+        cache: "no-store",
+      });
       const result = await response.json();
 
-      if (result.success) {
-        setBranches(result.branches || []);
-
-        const activeBranches = (result.branches || []).filter(
-          (branch: Branch) => branch.isActive,
-        );
-
-        if (activeBranches.length > 0 && !branchId) {
-          setBranchId(activeBranches[0]._id);
-        }
-      }
-    } catch (error) {
-      console.error("Error loading branches:", error);
-    }
-  }
-
-  async function loadCompanies() {
-    try {
-      const response = await fetch("/api/companies");
-
-      const result = await response.json();
-
-      if (result.success) {
+      if (response.ok && result.success) {
         setCompanies(result.companies || []);
       }
     } catch (error) {
       console.error("Error loading companies:", error);
     }
-  }
+  }, []);
 
-  async function loadPurchases() {
+  const loadPurchases = useCallback(async () => {
     try {
-      const response = await fetch("/api/flower-purchases");
-
+      const response = await fetch("/api/flower-purchases", {
+        cache: "no-store",
+      });
       const result = await response.json();
 
-      if (result.success) {
+      if (response.ok && result.success) {
         setPurchases(result.purchases || []);
+      } else {
+        setError(result.message || "Failed to load purchases.");
       }
     } catch (error) {
       console.error("Error loading purchases:", error);
+      setError("Failed to load purchases.");
     }
-  }
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+
+    async function initializePage() {
+      try {
+        const sessionResponse = await fetch("/api/auth/session", {
+          cache: "no-store",
+        });
+        const session = await sessionResponse.json();
+
+        if (!active) return;
+
+        const role = session?.user?.role ?? "";
+        const assignedId = session?.user?.branchId ?? "";
+
+        setUserRole(role);
+        setAssignedBranchId(assignedId);
+
+        if (role === "employee") {
+          if (!assignedId) {
+            setError(
+              "Your account has no assigned branch. Contact an administrator.",
+            );
+            return;
+          }
+
+          setBranchId(assignedId);
+        }
+
+        const branchResponse = await fetch("/api/branches", {
+          cache: "no-store",
+        });
+        const branchResult = await branchResponse.json();
+
+        if (!active) return;
+
+        if (branchResponse.ok && branchResult.success) {
+          const activeBranches: Branch[] = (branchResult.branches || []).filter(
+            (branch: Branch) => branch.isActive,
+          );
+
+          setBranches(activeBranches);
+
+          if (role !== "employee") {
+            setBranchId((current) => {
+              if (
+                current &&
+                activeBranches.some((branch) => branch._id === current)
+              ) {
+                return current;
+              }
+
+              return activeBranches[0]?._id ?? "";
+            });
+          }
+        }
+
+        await Promise.all([loadCompanies(), loadPurchases()]);
+      } catch (error) {
+        console.error("Error initializing Flower Purchases:", error);
+        if (active) setError("Failed to initialize the page.");
+      } finally {
+        if (active) setSessionLoaded(true);
+      }
+    }
+
+    initializePage();
+
+    return () => {
+      active = false;
+    };
+  }, [loadCompanies, loadPurchases]);
 
   function formatMoney(amount: number | undefined | null) {
     return `AED ${(amount ?? 0).toFixed(2)}`;
@@ -151,42 +194,28 @@ export default function FlowerPurchasesPage() {
   function handlePaymentStatusChange(status: PaymentStatus) {
     setPaymentStatus(status);
 
-    if (status === "pending") {
-      setPaidAmount("0");
-    }
-
-    if (status === "paid") {
-      setPaidAmount(totalAmount || "0");
-    }
-
-    if (status === "partial") {
-      setPaidAmount("");
-    }
+    if (status === "pending") setPaidAmount("0");
+    if (status === "paid") setPaidAmount(totalAmount || "0");
+    if (status === "partial") setPaidAmount("");
   }
 
   function resetForm() {
-    setBranchId(branches.find((branch) => branch.isActive)?._id || "");
+    setBranchId(
+      userRole === "employee"
+        ? assignedBranchId
+        : branches.find((branch) => branch.isActive)?._id || "",
+    );
 
-    setDate("2026-09-30");
-
+    setDate(getUaeDate());
     setCompanyId("");
-
     setSupplierName("");
-
     setInvoiceNumber("");
-
     setTotalAmount("");
-
     setPaymentStatus("pending");
-
     setPaidAmount("0");
-
     setPaymentMethod("bank");
-
     setNotes("");
-
     setEditingId(null);
-
     setError("");
   }
 
@@ -198,13 +227,15 @@ export default function FlowerPurchasesPage() {
     }
   }
 
-  async function handleSubmit(e: React.FormEvent) {
+  async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
-
     setError("");
 
-    if (!branchId) {
-      setError("Please select a branch.");
+    const effectiveBranchId =
+      userRole === "employee" ? assignedBranchId : branchId;
+
+    if (!effectiveBranchId) {
+      setError("No branch is selected or assigned.");
       return;
     }
 
@@ -227,24 +258,19 @@ export default function FlowerPurchasesPage() {
 
     let finalPaidAmount = 0;
 
-    if (paymentStatus === "pending") {
-      finalPaidAmount = 0;
-    }
-
     if (paymentStatus === "paid") {
       finalPaidAmount = billAmount;
-    }
-
-    if (paymentStatus === "partial") {
+    } else if (paymentStatus === "partial") {
       finalPaidAmount = Number(paidAmount);
 
-      if (!Number.isFinite(finalPaidAmount) || finalPaidAmount <= 0) {
-        setError("Please enter a valid paid amount for the partial payment.");
-        return;
-      }
-
-      if (finalPaidAmount >= billAmount) {
-        setError("For a fully paid bill, please select Paid.");
+      if (
+        !Number.isFinite(finalPaidAmount) ||
+        finalPaidAmount <= 0 ||
+        finalPaidAmount >= billAmount
+      ) {
+        setError(
+          "Enter a valid partial payment that is greater than zero and less than the bill amount.",
+        );
         return;
       }
     }
@@ -258,15 +284,11 @@ export default function FlowerPurchasesPage() {
         ? `/api/flower-purchases/${editingId}`
         : "/api/flower-purchases";
 
-      const method = editingId ? "PUT" : "POST";
-
       const response = await fetch(url, {
-        method,
-        headers: {
-          "Content-Type": "application/json",
-        },
+        method: editingId ? "PUT" : "POST",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          branchId,
+          branchId: effectiveBranchId,
           date,
           companyId,
           invoiceNumber,
@@ -276,7 +298,6 @@ export default function FlowerPurchasesPage() {
           paymentStatus,
           paymentMethod,
           notes,
-          createdBy: ownerId,
         }),
       });
 
@@ -288,11 +309,9 @@ export default function FlowerPurchasesPage() {
       }
 
       resetForm();
-
       await loadPurchases();
     } catch (error) {
       console.error("Error saving purchase:", error);
-
       setError("Failed to save purchase.");
     } finally {
       setLoading(false);
@@ -316,68 +335,73 @@ export default function FlowerPurchasesPage() {
       purchaseCompanyId = purchase.companyId._id;
     }
 
-    if (!purchaseBranchId) {
-      setError("This purchase bill does not have a valid branch.");
+    if (userRole === "employee" && purchaseBranchId !== assignedBranchId) {
+      setError("You can only edit purchases for your assigned branch.");
       return;
     }
 
-    if (!purchaseCompanyId) {
-      setError("This purchase bill does not have a valid company.");
+    if (!purchaseBranchId || !purchaseCompanyId) {
+      setError("This purchase is missing its branch or company.");
       return;
     }
 
-    setBranchId(purchaseBranchId);
-
+    setBranchId(userRole === "employee" ? assignedBranchId : purchaseBranchId);
     setDate(new Date(purchase.date).toISOString().split("T")[0]);
-
     setCompanyId(purchaseCompanyId);
-
     setSupplierName(purchase.supplierName || "");
-
     setInvoiceNumber(purchase.invoiceNumber || "");
-
     setTotalAmount(String(purchase.totalAmount ?? 0));
 
     const currentStatus = purchase.paymentStatus || "pending";
-
     setPaymentStatus(currentStatus);
-
     setPaidAmount(String(purchase.paidAmount ?? 0));
-
     setPaymentMethod(purchase.paymentMethod || "bank");
-
     setNotes(purchase.notes || "");
-
     setEditingId(purchase._id);
-
     setError("");
 
-    window.scrollTo({
-      top: 0,
-      behavior: "smooth",
-    });
+    window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
   function getCompanyName(purchase: Purchase) {
     if (typeof purchase.companyId === "string") {
-      const company = companies.find((item) => item._id === purchase.companyId);
-
-      return company?.companyName || "Unknown Company";
+      return (
+        companies.find((item) => item._id === purchase.companyId)
+          ?.companyName || "Unknown Company"
+      );
     }
 
     return purchase.companyId?.companyName || "Unknown Company";
   }
 
   function statusLabel(status: PaymentStatus) {
-    if (status === "paid") {
-      return "Paid";
-    }
-
-    if (status === "partial") {
-      return "Partial";
-    }
-
+    if (status === "paid") return "Paid";
+    if (status === "partial") return "Partial";
     return "Pending";
+  }
+
+  if (!sessionLoaded) {
+    return (
+      <main className="min-h-screen bg-[#f7f7f8] p-8">
+        Loading your account...
+      </main>
+    );
+  }
+
+  if (!userRole) {
+    return (
+      <main className="min-h-screen bg-[#f7f7f8] p-8">
+        Your session could not be loaded. Please log in again.
+      </main>
+    );
+  }
+
+  if (userRole === "employee" && !assignedBranchId) {
+    return (
+      <main className="min-h-screen bg-[#f7f7f8] p-8">
+        Your account has no assigned branch. Contact an administrator.
+      </main>
+    );
   }
 
   return (
@@ -385,7 +409,6 @@ export default function FlowerPurchasesPage() {
       <div className="mx-auto max-w-7xl">
         <div className="mb-8">
           <h1 className="text-3xl font-bold text-gray-900">Flower Purchases</h1>
-
           <p className="mt-1 text-gray-500">
             Record flower bills and payment details
           </p>
@@ -403,56 +426,57 @@ export default function FlowerPurchasesPage() {
           )}
 
           <form onSubmit={handleSubmit} className="grid gap-5 md:grid-cols-2">
-            {/* Branch */}
-            <div>
-              <label className="mb-2 block text-sm font-medium text-gray-700">
-                Branch
-              </label>
+            {userRole !== "employee" ? (
+              <div>
+                <label className="mb-2 block text-sm font-medium text-gray-700">
+                  Branch
+                </label>
+                <select
+                  value={branchId}
+                  onChange={(e) => setBranchId(e.target.value)}
+                  required
+                  className="w-full rounded-lg border border-gray-300 bg-white px-4 py-3 outline-none focus:border-[#253d2f]"
+                >
+                  <option value="">Select branch</option>
+                  {branches
+                    .filter((branch) => branch.isActive)
+                    .map((branch) => (
+                      <option key={branch._id} value={branch._id}>
+                        {branch.name}
+                      </option>
+                    ))}
+                </select>
+              </div>
+            ) : (
+              <div className="rounded-lg bg-[#eef4f0] p-4 text-sm text-[#253d2f]">
+                Your assigned branch is selected automatically.
+              </div>
+            )}
 
-              <select
-                value={branchId}
-                onChange={(e) => setBranchId(e.target.value)}
-                className="w-full rounded-lg border border-gray-300 bg-white px-4 py-3 outline-none focus:border-[#253d2f]"
-              >
-                <option value="">Select branch</option>
-
-                {branches
-                  .filter((branch) => branch.isActive)
-                  .map((branch) => (
-                    <option key={branch._id} value={branch._id}>
-                      {branch.name}
-                    </option>
-                  ))}
-              </select>
-            </div>
-
-            {/* Date */}
             <div>
               <label className="mb-2 block text-sm font-medium text-gray-700">
                 Date
               </label>
-
               <input
                 type="date"
                 value={date}
                 onChange={(e) => setDate(e.target.value)}
+                required
                 className="w-full rounded-lg border border-gray-300 px-4 py-3 outline-none focus:border-[#253d2f]"
               />
             </div>
 
-            {/* Company */}
             <div>
               <label className="mb-2 block text-sm font-medium text-gray-700">
                 Company
               </label>
-
               <select
                 value={companyId}
                 onChange={(e) => handleCompanyChange(e.target.value)}
+                required
                 className="w-full rounded-lg border border-gray-300 bg-white px-4 py-3 outline-none focus:border-[#253d2f]"
               >
                 <option value="">Select company</option>
-
                 {companies
                   .filter((company) => company.isActive)
                   .map((company) => (
@@ -463,12 +487,10 @@ export default function FlowerPurchasesPage() {
               </select>
             </div>
 
-            {/* Supplier */}
             <div>
               <label className="mb-2 block text-sm font-medium text-gray-700">
                 Supplier Name
               </label>
-
               <input
                 type="text"
                 value={supplierName}
@@ -478,12 +500,10 @@ export default function FlowerPurchasesPage() {
               />
             </div>
 
-            {/* Invoice */}
             <div>
               <label className="mb-2 block text-sm font-medium text-gray-700">
                 Bill / Invoice Number
               </label>
-
               <input
                 type="text"
                 value={invoiceNumber}
@@ -493,29 +513,26 @@ export default function FlowerPurchasesPage() {
               />
             </div>
 
-            {/* Bill Amount */}
             <div>
               <label className="mb-2 block text-sm font-medium text-gray-700">
                 Bill Amount
               </label>
-
               <input
                 type="number"
-                min="0"
+                min="0.01"
                 step="0.01"
                 value={totalAmount}
                 onChange={(e) => handleBillAmountChange(e.target.value)}
                 placeholder="0.00"
+                required
                 className="w-full rounded-lg border border-gray-300 px-4 py-3 outline-none focus:border-[#253d2f]"
               />
             </div>
 
-            {/* Payment Status */}
             <div>
               <label className="mb-2 block text-sm font-medium text-gray-700">
                 Payment Status
               </label>
-
               <select
                 value={paymentStatus}
                 onChange={(e) =>
@@ -524,20 +541,16 @@ export default function FlowerPurchasesPage() {
                 className="w-full rounded-lg border border-gray-300 bg-white px-4 py-3 outline-none focus:border-[#253d2f]"
               >
                 <option value="pending">Pending</option>
-
                 <option value="partial">Partial</option>
-
                 <option value="paid">Paid</option>
               </select>
             </div>
 
-            {/* Partial Paid Amount */}
             {paymentStatus === "partial" && (
               <div>
                 <label className="mb-2 block text-sm font-medium text-gray-700">
                   Paid Amount
                 </label>
-
                 <input
                   type="number"
                   min="0.01"
@@ -546,9 +559,9 @@ export default function FlowerPurchasesPage() {
                   value={paidAmount}
                   onChange={(e) => setPaidAmount(e.target.value)}
                   placeholder="Enter paid amount"
+                  required
                   className="w-full rounded-lg border border-gray-300 px-4 py-3 outline-none focus:border-[#253d2f]"
                 />
-
                 {totalAmount && paidAmount && (
                   <p className="mt-2 text-sm text-gray-500">
                     Remaining balance:{" "}
@@ -562,44 +575,29 @@ export default function FlowerPurchasesPage() {
               </div>
             )}
 
-            {/* Payment Method */}
             <div>
               <label className="mb-2 block text-sm font-medium text-gray-700">
                 Payment Method
               </label>
-
               <select
                 value={paymentMethod}
                 onChange={(e) =>
-                  setPaymentMethod(
-                    e.target.value as
-                      | "cash"
-                      | "visa"
-                      | "online"
-                      | "bank"
-                      | "other",
-                  )
+                  setPaymentMethod(e.target.value as PaymentMethod)
                 }
                 className="w-full rounded-lg border border-gray-300 bg-white px-4 py-3 outline-none focus:border-[#253d2f]"
               >
                 <option value="bank">Bank</option>
-
                 <option value="cash">Cash</option>
-
                 <option value="visa">Visa</option>
-
                 <option value="online">Online</option>
-
                 <option value="other">Other</option>
               </select>
             </div>
 
-            {/* Notes */}
             <div className="md:col-span-2">
               <label className="mb-2 block text-sm font-medium text-gray-700">
                 Notes
               </label>
-
               <textarea
                 value={notes}
                 onChange={(e) => setNotes(e.target.value)}
@@ -609,11 +607,10 @@ export default function FlowerPurchasesPage() {
               />
             </div>
 
-            {/* Buttons */}
             <div className="flex gap-3 md:col-span-2">
               <button
                 type="submit"
-                disabled={loading}
+                disabled={loading || !branchId}
                 className="rounded-lg bg-[#253d2f] px-6 py-3 text-sm font-medium text-white hover:bg-[#1d3025] disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {loading
@@ -636,13 +633,11 @@ export default function FlowerPurchasesPage() {
           </form>
         </div>
 
-        {/* Purchase Bills */}
         <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
           <div className="mb-6">
             <h2 className="text-xl font-semibold text-gray-900">
               Purchase Bills
             </h2>
-
             <p className="mt-1 text-sm text-gray-500">
               {purchases.length} purchase bills
             </p>
@@ -657,40 +652,25 @@ export default function FlowerPurchasesPage() {
               <table className="w-full text-left">
                 <thead>
                   <tr className="border-b border-gray-200">
-                    <th className="px-4 py-3 text-sm font-semibold text-gray-600">
-                      Date
-                    </th>
-
-                    <th className="px-4 py-3 text-sm font-semibold text-gray-600">
-                      Company
-                    </th>
-
-                    <th className="px-4 py-3 text-sm font-semibold text-gray-600">
-                      Bill
-                    </th>
-
-                    <th className="px-4 py-3 text-sm font-semibold text-gray-600">
-                      Bill Amount
-                    </th>
-
-                    <th className="px-4 py-3 text-sm font-semibold text-gray-600">
-                      Paid
-                    </th>
-
-                    <th className="px-4 py-3 text-sm font-semibold text-gray-600">
-                      Balance
-                    </th>
-
-                    <th className="px-4 py-3 text-sm font-semibold text-gray-600">
-                      Status
-                    </th>
-
-                    <th className="px-4 py-3 text-right text-sm font-semibold text-gray-600">
-                      Actions
-                    </th>
+                    {[
+                      "Date",
+                      "Company",
+                      "Bill",
+                      "Bill Amount",
+                      "Paid",
+                      "Balance",
+                      "Status",
+                      "Actions",
+                    ].map((heading) => (
+                      <th
+                        key={heading}
+                        className="px-4 py-3 text-sm font-semibold text-gray-600"
+                      >
+                        {heading}
+                      </th>
+                    ))}
                   </tr>
                 </thead>
-
                 <tbody>
                   {purchases.map((purchase) => (
                     <tr
@@ -700,27 +680,21 @@ export default function FlowerPurchasesPage() {
                       <td className="px-4 py-4 text-sm text-gray-600">
                         {new Date(purchase.date).toLocaleDateString()}
                       </td>
-
                       <td className="px-4 py-4 font-medium text-gray-900">
                         {getCompanyName(purchase)}
                       </td>
-
                       <td className="px-4 py-4 text-sm text-gray-600">
                         {purchase.invoiceNumber || "-"}
                       </td>
-
                       <td className="px-4 py-4 font-medium text-gray-900">
                         {formatMoney(purchase.totalAmount)}
                       </td>
-
                       <td className="px-4 py-4 text-green-700">
                         {formatMoney(purchase.paidAmount)}
                       </td>
-
                       <td className="px-4 py-4 font-medium text-red-700">
                         {formatMoney(purchase.balanceAmount)}
                       </td>
-
                       <td className="px-4 py-4">
                         <span
                           className={`inline-flex rounded-full px-3 py-1 text-xs font-medium ${
@@ -734,7 +708,6 @@ export default function FlowerPurchasesPage() {
                           {statusLabel(purchase.paymentStatus)}
                         </span>
                       </td>
-
                       <td className="px-4 py-4">
                         <div className="flex justify-end">
                           <button

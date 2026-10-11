@@ -15,33 +15,46 @@ export async function proxy(request: Request) {
     return NextResponse.next();
   }
 
-  // Protected pages
-  const protectedRoutes = [
-    "/dashboard",
-    "/branches",
-    "/daily-entry",
-    "/expenses",
-    "/flower-purchases",
-    "/purchase-payments",
-    "/companies",
-    "/reports",
-    "/users",
-    "/settings",
-  ];
-
-  const isProtectedRoute = protectedRoutes.some(
-    (route) => pathname === route || pathname.startsWith(`${route}/`),
-  );
-
-  if (isProtectedRoute && !token) {
+  // Require login for protected pages
+  if (!token) {
     return NextResponse.redirect(new URL("/login", request.url));
   }
 
-  // Owner-only routes
-  if (pathname.startsWith("/users") || pathname.startsWith("/settings")) {
-    if (token?.role !== "owner") {
-      return NextResponse.redirect(new URL("/dashboard", request.url));
-    }
+  const role = token.role as string | undefined;
+
+  // Employee: only permitted pages
+  const employeeAllowedRoutes = [
+    "/dashboard",
+    "/daily-entry",
+    "/flower-purchases",
+    "/companies",
+    "/purchase-payments",
+  ];
+
+  if (
+    role === "employee" &&
+    !employeeAllowedRoutes.some(
+      (route) => pathname === route || pathname.startsWith(`${route}/`),
+    )
+  ) {
+    return NextResponse.redirect(new URL("/dashboard", request.url));
+  }
+
+  // Owner-only pages
+  if (
+    (pathname.startsWith("/users") || pathname.startsWith("/settings")) &&
+    role !== "owner"
+  ) {
+    return NextResponse.redirect(new URL("/dashboard", request.url));
+  }
+
+  // Branch management: owner and admin only
+  if (
+    pathname.startsWith("/branches") &&
+    role !== "owner" &&
+    role !== "admin"
+  ) {
+    return NextResponse.redirect(new URL("/dashboard", request.url));
   }
 
   return NextResponse.next();
