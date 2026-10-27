@@ -1,88 +1,136 @@
+
 import { NextResponse } from "next/server";
+import mongoose from "mongoose";
+
 import connectDB from "@/lib/mongodb";
 import FlowerPurchase from "@/models/FlowerPurchase";
 import Company from "@/models/Company";
+import Branch from "@/models/Branch";
 import "@/models/User";
+
 import {
   requireAuth,
   requireWriteAccess,
   applyBranchAccess,
 } from "@/lib/permissions";
 
+export const dynamic = "force-dynamic";
+
+const PAYMENT_METHODS = [
+  "cash",
+  "visa",
+  "online",
+  "bank",
+  "other",
+] as const;
+
 function calculatePayment(totalAmount: number, paidAmount: number) {
-  const total = Number(totalAmount);
-  const paid = Number(paidAmount);
-
-  if (paid < 0) {
-    throw new Error("Paid amount cannot be negative");
+  if (!Number.isFinite(totalAmount) || totalAmount < 0) {
+    throw new Error("Enter a valid bill amount.");
   }
 
-  if (paid > total) {
-    throw new Error("Paid amount cannot be greater than bill amount");
+  if (!Number.isFinite(paidAmount) || paidAmount < 0) {
+    throw new Error("Enter a valid paid amount.");
   }
 
-  const balance = total - paid;
-
-  let paymentStatus: "paid" | "pending" | "partial";
-
-  if (balance === 0) {
-    paymentStatus = "paid";
-  } else if (paid === 0) {
-    paymentStatus = "pending";
-  } else {
-    paymentStatus = "partial";
+  if (paidAmount > totalAmount) {
+    throw new Error("Paid amount cannot exceed the bill amount.");
   }
 
-  return {
-    paidAmount: paid,
-    balanceAmount: balance,
-    paymentStatus,
-  };
+  const balanceAmount = Number((totalAmount - paidAmount).toFixed(2));
+
+  const paymentStatus: "paid" | "pending" | "partial" =
+    balanceAmount === 0
+      ? "paid"
+      : paidAmount === 0
+        ? "pending"
+        : "partial";
+
+  return { paidAmount, balanceAmount, paymentStatus };
 }
 
+function handleError(error: unknown) {
+  const message = error instanceof Error ? error.message : "";
+
+  if (message === "UNAUTHORIZED") {
+    return NextResponse.json(
+      { success: false, message: "Please log in." },
+      { status: 401 },
+    );
+  }
+
+  if (
+    message === "FORBIDDEN" ||
+    message.includes("not assigned to a branch")
+  ) {
+    return NextResponse.json(
+      { success: false, message: "You do not have permission to perform this action." },
+      { status: 403 },
+    );
+  }
+
+  console.error("Flower purchases API error:", error);
+
+  return NextResponse.json(
+    { success: false, message: "Unable to process flower purchases." },
+    { status: 500 },
+  );
+}
+
+function parseDate(value: unknown): Date | null {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return null;
+  }
+
+  const date = new Date(`${value}T00:00:00.000Z`);
+
+  if (
+    Number.isNaN(date.getTime()) ||
+    date.toISOString().slice(0, 10) !== value
+  ) {
+    return null;
+  }
+
+  return date;
+}
+
+// GET: List purchases. Employees see only their assigned branch.
 export async function GET() {
   try {
     const user = await requireAuth();
-
     await connectDB();
 
     const filter: Record<string, unknown> = {};
-
     applyBranchAccess(user, filter);
 
     const purchases = await FlowerPurchase.find(filter)
       .populate("companyId", "companyName supplierName")
       .populate("branchId", "name")
-      .sort({
-        date: -1,
-        createdAt: -1,
-      })
+      .sort({ date: -1, createdAt: -1 })
       .lean();
 
-    return NextResponse.json({
-      success: true,
-      purchases,
-    });
+    return NextResponse.json({ success: true, purchases });
   } catch (error) {
-    console.error("Error loading flower purchases:", error);
-
-    return NextResponse.json(
-      {
-        success: false,
-        message: "Failed to load flower purchases",
-      },
-      { status: 500 },
-    );
+    return handleError(error);
   }
 }
 
+// POST: Create a purchase with validated payment details.
 export async function POST(request: Request) {
   try {
     const user = await requireWriteAccess();
-
     await connectDB();
 
-    const body = await request.json();
+    let body: Record<string, unknown>;
+
+    try {
+      body = await request.json();
+    } catch {
+      return NextResponse.json(
+        { success: false, message: "Invalid request body." },
+        { status: 400 },
+      );
+    }
 
     const {
       branchId,
@@ -95,32 +143,48 @@ export async function POST(request: Request) {
       notes,
     } = body;
 
-    if (!branchId) {
+    // Employees must use their assigned branch. Do not trust their
+    // submitted branch ID.
+    let selectedBranchId: string;
+
+    if (user.role === "employee") {
+      if (!user.branchId) {
+        return NextResponse.json(
+          { success: false, message: "Your account is not assigned to a branch." },
+          { status: 403 },
+        );
+      }
+
+      selectedBranchId = user.branchId;
+    } else {
+      if (
+        typeof branchId !== "string" ||
+        !mongoose.isValidObjectId(branchId)
+      ) {
+        return NextResponse.json(
+          { success: false, message: "A valid branch is required." },
+          { status: 400 },
+        );
+      }
+
+      selectedBranchId = branchId;
+    }
+
+    const purchaseDate = parseDate(date);
+
+    if (!purchaseDate) {
       return NextResponse.json(
-        {
-          success: false,
-          message: "Branch is required",
-        },
+        { success: false, message: "Enter a valid purchase date in YYYY-MM-DD format." },
         { status: 400 },
       );
     }
 
-    if (!date) {
+    if (
+      typeof companyId !== "string" ||
+      !mongoose.isValidObjectId(companyId)
+    ) {
       return NextResponse.json(
-        {
-          success: false,
-          message: "Date is required",
-        },
-        { status: 400 },
-      );
-    }
-
-    if (!companyId) {
-      return NextResponse.json(
-        {
-          success: false,
-          message: "Company is required",
-        },
+        { success: false, message: "A valid company is required." },
         { status: 400 },
       );
     }
@@ -128,34 +192,62 @@ export async function POST(request: Request) {
     if (
       totalAmount === undefined ||
       totalAmount === null ||
-      Number(totalAmount) < 0
+      totalAmount === ""
     ) {
       return NextResponse.json(
+        { success: false, message: "Bill amount is required." },
+        { status: 400 },
+      );
+    }
+
+    if (
+      paidAmount === undefined ||
+      paidAmount === null ||
+      paidAmount === ""
+    ) {
+      return NextResponse.json(
+        { success: false, message: "Paid amount is required." },
+        { status: 400 },
+      );
+    }
+
+    const total = Number(totalAmount);
+    const paid = Number(paidAmount);
+
+    let payment;
+
+    try {
+      payment = calculatePayment(total, paid);
+    } catch (error) {
+      return NextResponse.json(
         {
           success: false,
-          message: "Valid bill amount is required",
+          message: error instanceof Error
+            ? error.message
+            : "Invalid payment amounts.",
         },
         { status: 400 },
       );
     }
 
-    if (paidAmount === undefined || paidAmount === null) {
+    if (
+      typeof paymentMethod !== "string" ||
+      !PAYMENT_METHODS.includes(
+        paymentMethod as (typeof PAYMENT_METHODS)[number],
+      )
+    ) {
       return NextResponse.json(
-        {
-          success: false,
-          message: "Paid amount is required",
-        },
+        { success: false, message: "Select a valid payment method." },
         { status: 400 },
       );
     }
 
-    if (!paymentMethod) {
+    const branch = await Branch.findById(selectedBranchId).lean();
+
+    if (!branch) {
       return NextResponse.json(
-        {
-          success: false,
-          message: "Payment method is required",
-        },
-        { status: 400 },
+        { success: false, message: "Branch not found." },
+        { status: 404 },
       );
     }
 
@@ -163,91 +255,43 @@ export async function POST(request: Request) {
 
     if (!company) {
       return NextResponse.json(
-        {
-          success: false,
-          message: "Company not found",
-        },
+        { success: false, message: "Company not found." },
         { status: 404 },
       );
     }
 
     if (!company.isActive) {
       return NextResponse.json(
-        {
-          success: false,
-          message: "This company is inactive and cannot be selected",
-        },
+        { success: false, message: "This company is inactive and cannot be selected." },
         { status: 400 },
       );
-    }
-
-    let payment;
-
-    try {
-      payment = calculatePayment(Number(totalAmount), Number(paidAmount));
-    } catch (error) {
-      return NextResponse.json(
-        {
-          success: false,
-          message:
-            error instanceof Error ? error.message : "Invalid payment amount",
-        },
-        { status: 400 },
-      );
-    }
-
-    let selectedBranchId = branchId;
-
-    // Employees can only create purchases
-    // for their assigned branch.
-    if (user.role === "employee") {
-      if (!user.branchId) {
-        return NextResponse.json(
-          {
-            success: false,
-            message: "Employee is not assigned to a branch.",
-          },
-          { status: 403 },
-        );
-      }
-
-      selectedBranchId = user.branchId;
     }
 
     const purchase = await FlowerPurchase.create({
       branchId: selectedBranchId,
-      date,
+      date: purchaseDate,
       companyId,
       supplierName: company.supplierName,
-      invoiceNumber,
-      totalAmount: Number(totalAmount),
+      invoiceNumber:
+        typeof invoiceNumber === "string" ? invoiceNumber.trim() : "",
+      totalAmount: total,
       paidAmount: payment.paidAmount,
       balanceAmount: payment.balanceAmount,
       paymentStatus: payment.paymentStatus,
       paymentMethod,
-      notes,
-
-      // Use the logged-in user.
+      notes: typeof notes === "string" ? notes.trim() : "",
       createdBy: user.id,
     });
 
     return NextResponse.json(
       {
         success: true,
-        message: "Flower purchase added successfully",
+        message: "Flower purchase added successfully.",
         purchase,
       },
       { status: 201 },
     );
   } catch (error) {
-    console.error("Error creating flower purchase:", error);
-
-    return NextResponse.json(
-      {
-        success: false,
-        message: "Failed to create flower purchase",
-      },
-      { status: 500 },
-    );
+    return handleError(error);
   }
 }

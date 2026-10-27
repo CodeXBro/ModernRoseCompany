@@ -1,20 +1,30 @@
 import { NextResponse } from "next/server";
+import mongoose from "mongoose";
+
 import connectDB from "@/lib/mongodb";
 import FlowerPurchase from "@/models/FlowerPurchase";
 import "@/models/Company";
 import "@/models/Branch";
-import { requireWriteAccess, applyBranchAccess } from "@/lib/permissions";
+import { requireWriteAccess } from "@/lib/permissions";
+
+export const dynamic = "force-dynamic";
+
+const PAYMENT_METHODS = ["cash", "visa", "online", "bank", "other"] as const;
 
 function calculatePayment(totalAmount: number, paidAmount: number) {
-  if (paidAmount < 0) {
-    throw new Error("Paid amount cannot be negative.");
+  if (!Number.isFinite(totalAmount) || totalAmount < 0) {
+    throw new Error("The bill amount is invalid.");
+  }
+
+  if (!Number.isFinite(paidAmount) || paidAmount < 0) {
+    throw new Error("Paid amount must be a valid non-negative number.");
   }
 
   if (paidAmount > totalAmount) {
-    throw new Error("Paid amount cannot be greater than bill amount.");
+    throw new Error("Paid amount cannot exceed the bill amount.");
   }
 
-  const balanceAmount = totalAmount - paidAmount;
+  const balanceAmount = Number((totalAmount - paidAmount).toFixed(2));
 
   let paymentStatus: "paid" | "pending" | "partial";
 
@@ -46,6 +56,16 @@ export async function PUT(
 
     const { id } = await context.params;
 
+    if (!mongoose.isValidObjectId(id)) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: "Invalid purchase ID.",
+        },
+        { status: 400 },
+      );
+    }
+
     const purchase = await FlowerPurchase.findById(id);
 
     if (!purchase) {
@@ -58,14 +78,19 @@ export async function PUT(
       );
     }
 
-    // Employees can only update payments
-    // for purchases in their assigned branch.
+    // Employees can only update payments in their assigned branch.
     if (user.role === "employee") {
-      const filter: Record<string, unknown> = {};
+      if (!user.branchId) {
+        return NextResponse.json(
+          {
+            success: false,
+            message: "Your account is not assigned to a branch.",
+          },
+          { status: 403 },
+        );
+      }
 
-      applyBranchAccess(user, filter);
-
-      if (purchase.branchId.toString() !== String(filter.branchId)) {
+      if (String(purchase.branchId) !== String(user.branchId)) {
         return NextResponse.json(
           {
             success: false,
@@ -76,7 +101,33 @@ export async function PUT(
       }
     }
 
-    const body = await request.json();
+    let body: Record<string, unknown>;
+
+    try {
+      body = await request.json();
+    } catch {
+      return NextResponse.json(
+        {
+          success: false,
+          message: "Invalid request body.",
+        },
+        { status: 400 },
+      );
+    }
+
+    if (
+      body.paidAmount === undefined ||
+      body.paidAmount === null ||
+      body.paidAmount === ""
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: "Paid amount is required.",
+        },
+        { status: 400 },
+      );
+    }
 
     const paidAmount = Number(body.paidAmount);
 
@@ -90,17 +141,46 @@ export async function PUT(
       );
     }
 
-    const payment = calculatePayment(purchase.totalAmount, paidAmount);
+    let paymentMethod = purchase.paymentMethod;
+
+    if (body.paymentMethod !== undefined) {
+      if (
+        typeof body.paymentMethod !== "string" ||
+        !PAYMENT_METHODS.includes(
+          body.paymentMethod as (typeof PAYMENT_METHODS)[number],
+        )
+      ) {
+        return NextResponse.json(
+          {
+            success: false,
+            message: "Select a valid payment method.",
+          },
+          { status: 400 },
+        );
+      }
+
+      paymentMethod = body.paymentMethod;
+    }
+
+    let payment;
+
+    try {
+      payment = calculatePayment(Number(purchase.totalAmount), paidAmount);
+    } catch (error) {
+      return NextResponse.json(
+        {
+          success: false,
+          message:
+            error instanceof Error ? error.message : "Invalid payment details.",
+        },
+        { status: 400 },
+      );
+    }
 
     purchase.paidAmount = payment.paidAmount;
-
     purchase.balanceAmount = payment.balanceAmount;
-
     purchase.paymentStatus = payment.paymentStatus;
-
-    if (body.paymentMethod) {
-      purchase.paymentMethod = body.paymentMethod;
-    }
+    purchase.paymentMethod = paymentMethod;
 
     await purchase.save();
 
@@ -115,17 +195,39 @@ export async function PUT(
       purchase: updatedPurchase,
     });
   } catch (error) {
-    console.error("Error updating purchase payment:", error);
+    const message = error instanceof Error ? error.message : "";
 
-    const message =
-      error instanceof Error ? error.message : "Failed to update payment.";
+    if (message === "UNAUTHORIZED") {
+      return NextResponse.json(
+        {
+          success: false,
+          message: "Please log in.",
+        },
+        { status: 401 },
+      );
+    }
+
+    if (
+      message === "FORBIDDEN" ||
+      message === "Employee is not assigned to a branch."
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: "You do not have permission to update this payment.",
+        },
+        { status: 403 },
+      );
+    }
+
+    console.error("Error updating purchase payment:", error);
 
     return NextResponse.json(
       {
         success: false,
-        message,
+        message: "Failed to update purchase payment.",
       },
-      { status: 400 },
+      { status: 500 },
     );
   }
 }

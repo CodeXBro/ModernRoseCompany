@@ -1,14 +1,55 @@
 import { NextResponse } from "next/server";
+import mongoose from "mongoose";
+
 import connectDB from "@/lib/mongodb";
-import User from "@/models/User";
+import User, { UserRole } from "@/models/User";
+import Branch from "@/models/Branch";
 import { hashPassword } from "@/lib/password";
 import { requireOwner } from "@/lib/permissions";
+
+export const dynamic = "force-dynamic";
 
 type RouteContext = {
   params: Promise<{
     id: string;
   }>;
 };
+
+const allowedRoles: UserRole[] = ["admin", "employee", "viewer"];
+
+function handleError(error: unknown) {
+  console.error("Error updating user:", error);
+
+  const message = error instanceof Error ? error.message : "";
+
+  if (message === "UNAUTHORIZED") {
+    return NextResponse.json(
+      {
+        success: false,
+        message: "Please log in to continue.",
+      },
+      { status: 401 },
+    );
+  }
+
+  if (message === "FORBIDDEN") {
+    return NextResponse.json(
+      {
+        success: false,
+        message: "Only the owner can update user accounts.",
+      },
+      { status: 403 },
+    );
+  }
+
+  return NextResponse.json(
+    {
+      success: false,
+      message: "Failed to update user.",
+    },
+    { status: 500 },
+  );
+}
 
 export async function PUT(request: Request, context: RouteContext) {
   try {
@@ -17,11 +58,32 @@ export async function PUT(request: Request, context: RouteContext) {
 
     const { id } = await context.params;
 
-    const body = await request.json();
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: "Invalid user ID.",
+        },
+        { status: 400 },
+      );
+    }
+
+    let body: Record<string, unknown>;
+
+    try {
+      body = await request.json();
+    } catch {
+      return NextResponse.json(
+        {
+          success: false,
+          message: "Invalid request body.",
+        },
+        { status: 400 },
+      );
+    }
 
     const { name, email, password, role, branchId, isActive } = body;
 
-    // Find the user
     const user = await User.findById(id);
 
     if (!user) {
@@ -34,7 +96,7 @@ export async function PUT(request: Request, context: RouteContext) {
       );
     }
 
-    // Owner cannot be modified from user management
+    // The owner account cannot be modified here.
     if (user.role === "owner") {
       return NextResponse.json(
         {
@@ -45,32 +107,47 @@ export async function PUT(request: Request, context: RouteContext) {
       );
     }
 
-    // Name
+    // Name validation
     if (name !== undefined) {
-      const cleanName = String(name).trim();
-
-      if (!cleanName) {
+      if (
+        typeof name !== "string" ||
+        !name.trim() ||
+        name.trim().length > 100
+      ) {
         return NextResponse.json(
           {
             success: false,
-            message: "Name cannot be empty.",
+            message: "Name must be between 1 and 100 characters.",
           },
           { status: 400 },
         );
       }
 
-      user.name = cleanName;
+      user.name = name.trim();
     }
 
-    // Email
+    // Email validation
     if (email !== undefined) {
-      const normalizedEmail = String(email).toLowerCase().trim();
-
-      if (!normalizedEmail) {
+      if (typeof email !== "string") {
         return NextResponse.json(
           {
             success: false,
-            message: "Email cannot be empty.",
+            message: "Invalid email address.",
+          },
+          { status: 400 },
+        );
+      }
+
+      const normalizedEmail = email.trim().toLowerCase();
+
+      if (
+        normalizedEmail.length > 254 ||
+        !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)
+      ) {
+        return NextResponse.json(
+          {
+            success: false,
+            message: "Please provide a valid email address.",
           },
           { status: 400 },
         );
@@ -78,9 +155,10 @@ export async function PUT(request: Request, context: RouteContext) {
 
       const existingUser = await User.findOne({
         email: normalizedEmail,
-      });
+        _id: { $ne: user._id },
+      }).select("_id");
 
-      if (existingUser && existingUser._id.toString() !== user._id.toString()) {
+      if (existingUser) {
         return NextResponse.json(
           {
             success: false,
@@ -93,11 +171,12 @@ export async function PUT(request: Request, context: RouteContext) {
       user.email = normalizedEmail;
     }
 
-    // Role
+    // Role validation
     if (role !== undefined) {
-      const allowedRoles = ["admin", "employee", "viewer"];
-
-      if (!allowedRoles.includes(role)) {
+      if (
+        typeof role !== "string" ||
+        !allowedRoles.includes(role as UserRole)
+      ) {
         return NextResponse.json(
           {
             success: false,
@@ -107,28 +186,102 @@ export async function PUT(request: Request, context: RouteContext) {
         );
       }
 
-      user.role = role;
+      user.role = role as UserRole;
     }
 
-    // Branch
+    // Branch validation
     if (branchId !== undefined) {
-      if (branchId) {
-        user.branchId = branchId;
-      } else {
+      if (branchId === null || branchId === "") {
+        if (user.role === "employee") {
+          return NextResponse.json(
+            {
+              success: false,
+              message: "An employee must be assigned to a branch.",
+            },
+            { status: 400 },
+          );
+        }
+
         user.branchId = undefined;
+      } else {
+        if (
+          typeof branchId !== "string" ||
+          !mongoose.Types.ObjectId.isValid(branchId)
+        ) {
+          return NextResponse.json(
+            {
+              success: false,
+              message: "Invalid branch ID.",
+            },
+            { status: 400 },
+          );
+        }
+
+        const branch = await Branch.findById(branchId).select("_id");
+
+        if (!branch) {
+          return NextResponse.json(
+            {
+              success: false,
+              message: "The selected branch does not exist.",
+            },
+            { status: 400 },
+          );
+        }
+
+        user.branchId = new mongoose.Types.ObjectId(branchId);
       }
     }
 
-    // Active / inactive
-    if (isActive !== undefined) {
-      user.isActive = Boolean(isActive);
+    // Ensure employees always have a branch.
+    if (user.role === "employee" && !user.branchId) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: "An employee must be assigned to a branch.",
+        },
+        { status: 400 },
+      );
     }
 
-    // Password
-    if (password !== undefined) {
-      const newPassword = String(password);
+    // Active / inactive validation
+    if (isActive !== undefined) {
+      if (typeof isActive !== "boolean") {
+        return NextResponse.json(
+          {
+            success: false,
+            message: "isActive must be true or false.",
+          },
+          { status: 400 },
+        );
+      }
 
-      if (newPassword && newPassword.length < 6) {
+      user.isActive = isActive;
+    }
+
+    // Password validation and hashing
+    if (password !== undefined) {
+      if (typeof password !== "string") {
+        return NextResponse.json(
+          {
+            success: false,
+            message: "Password must be text.",
+          },
+          { status: 400 },
+        );
+      }
+
+      if (password.length > 128) {
+        return NextResponse.json(
+          {
+            success: false,
+            message: "Password cannot exceed 128 characters.",
+          },
+          { status: 400 },
+        );
+      }
+
+      if (password.length > 0 && password.length < 6) {
         return NextResponse.json(
           {
             success: false,
@@ -138,8 +291,8 @@ export async function PUT(request: Request, context: RouteContext) {
         );
       }
 
-      if (newPassword) {
-        user.password = await hashPassword(newPassword);
+      if (password.length > 0) {
+        user.password = await hashPassword(password);
       }
     }
 
@@ -158,14 +311,6 @@ export async function PUT(request: Request, context: RouteContext) {
       },
     });
   } catch (error) {
-    console.error("Error updating user:", error);
-
-    return NextResponse.json(
-      {
-        success: false,
-        message: "Failed to update user.",
-      },
-      { status: 500 },
-    );
+    return handleError(error);
   }
 }

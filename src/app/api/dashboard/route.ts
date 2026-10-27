@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import mongoose from "mongoose";
 import connectDB from "@/lib/mongodb";
 import Branch from "@/models/Branch";
 import DailyEntry from "@/models/DailyEntry";
@@ -30,19 +31,20 @@ function money(value: unknown): number {
 
 function idOf(value: unknown): string {
   if (!value) return "";
+
   if (typeof value === "object" && value !== null && "_id" in value) {
     return String((value as { _id: unknown })._id);
   }
+
   return String(value);
 }
 
 export async function GET(request: NextRequest) {
   try {
+    const user = await requireAuth();
     await connectDB();
 
-    const user = await requireAuth();
     const params = request.nextUrl.searchParams;
-
     const mode = params.get("mode") === "day" ? "day" : "month";
     const selectedDate = params.get("date") || getUaeDate();
     const requestedBranchId = params.get("branchId") || "";
@@ -68,8 +70,13 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    // Daily mode: selected day only.
-    // Monthly mode: the entire month containing the selected date.
+    if (requestedBranchId && !mongoose.isValidObjectId(requestedBranchId)) {
+      return NextResponse.json(
+        { success: false, message: "Invalid branch ID." },
+        { status: 400 },
+      );
+    }
+
     const startDate =
       mode === "day"
         ? new Date(Date.UTC(year, month - 1, day))
@@ -80,14 +87,27 @@ export async function GET(request: NextRequest) {
         ? new Date(Date.UTC(year, month - 1, day + 1))
         : new Date(Date.UTC(year, month, 1));
 
+    // Employees are always restricted to their assigned branch.
     const branchFilter: Record<string, unknown> = {};
 
     if (requestedBranchId) {
       branchFilter.branchId = requestedBranchId;
     }
 
-    // Employees are always restricted to their assigned branch.
     applyBranchAccess(user, branchFilter);
+
+    if (requestedBranchId && user.role !== "employee") {
+      const branchExists = await Branch.exists({
+        _id: requestedBranchId,
+      });
+
+      if (!branchExists) {
+        return NextResponse.json(
+          { success: false, message: "Branch not found." },
+          { status: 404 },
+        );
+      }
+    }
 
     const dateFilter = {
       date: {
@@ -96,29 +116,20 @@ export async function GET(request: NextRequest) {
       },
     };
 
-    const [dailyEntries, expenses, purchases, branchDocuments] =
+    const branchQuery =
+      user.role === "employee"
+        ? { _id: user.branchId }
+        : requestedBranchId
+          ? { _id: requestedBranchId }
+          : {};
+
+    const [dailyEntries, expenseRecords, purchases, branchDocuments] =
       await Promise.all([
         DailyEntry.find({ ...dateFilter, ...branchFilter }).lean(),
         Expense.find({ ...dateFilter, ...branchFilter }).lean(),
         FlowerPurchase.find({ ...dateFilter, ...branchFilter }).lean(),
-        Branch.find({
-          isActive: true,
-          ...(user.role === "employee"
-            ? { _id: user.branchId }
-            : requestedBranchId
-              ? { _id: requestedBranchId }
-              : {}),
-        }).lean(),
+        Branch.find(branchQuery).lean(),
       ]);
-
-    const totals = {
-      cash: 0,
-      visa: 0,
-      online: 0,
-      other: 0,
-      general: 0,
-      flowerPurchases: 0,
-    };
 
     type BranchTotals = {
       branchId: string;
@@ -129,6 +140,15 @@ export async function GET(request: NextRequest) {
       other: number;
       generalExpenses: number;
       flowerPurchases: number;
+    };
+
+    const totals = {
+      cash: 0,
+      visa: 0,
+      online: 0,
+      other: 0,
+      general: 0,
+      flowerPurchases: 0,
     };
 
     const branchTotals = new Map<string, BranchTotals>();
@@ -148,11 +168,8 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    function getBranch(branchIdValue: unknown): BranchTotals | undefined {
-      const branchId = idOf(branchIdValue);
-
-      // Never create or return a branch outside the permitted branch list.
-      return branchTotals.get(branchId);
+    function getBranch(value: unknown) {
+      return branchTotals.get(idOf(value));
     }
 
     for (const entry of dailyEntries) {
@@ -184,7 +201,7 @@ export async function GET(request: NextRequest) {
       totals.other += other;
     }
 
-    for (const expense of expenses) {
+    for (const expense of expenseRecords) {
       const branch = getBranch(expense.branchId);
       if (!branch) continue;
 
@@ -259,8 +276,7 @@ export async function GET(request: NextRequest) {
   } catch (error) {
     console.error("Dashboard API error:", error);
 
-    const message =
-      error instanceof Error ? error.message : "Unable to load dashboard.";
+    const message = error instanceof Error ? error.message : "";
 
     if (message === "UNAUTHORIZED") {
       return NextResponse.json(
@@ -269,9 +285,15 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    if (message === "FORBIDDEN") {
+    if (
+      message === "FORBIDDEN" ||
+      message === "Employee is not assigned to a branch."
+    ) {
       return NextResponse.json(
-        { success: false, message: "You do not have permission." },
+        {
+          success: false,
+          message: "You do not have permission to access this data.",
+        },
         { status: 403 },
       );
     }

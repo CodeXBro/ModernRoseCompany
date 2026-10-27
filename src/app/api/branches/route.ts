@@ -3,12 +3,41 @@ import connectDB from "@/lib/mongodb";
 import Branch from "@/models/Branch";
 import { requireAuth, requireBranchManagement } from "@/lib/permissions";
 
+export const dynamic = "force-dynamic";
+
+function handleError(error: unknown, action: string) {
+  const message = error instanceof Error ? error.message : "";
+
+  if (message === "UNAUTHORIZED") {
+    return NextResponse.json(
+      { success: false, message: "Please log in to continue." },
+      { status: 401 },
+    );
+  }
+
+  if (message === "FORBIDDEN") {
+    return NextResponse.json(
+      {
+        success: false,
+        message: "You do not have permission to perform this action.",
+      },
+      { status: 403 },
+    );
+  }
+
+  console.error(`Error ${action} branch:`, error);
+
+  return NextResponse.json(
+    { success: false, message: `Failed to ${action} branch.` },
+    { status: 500 },
+  );
+}
+
 export async function GET() {
   try {
     const user = await requireAuth();
     await connectDB();
 
-    // Employees can only access their assigned branch.
     const filter =
       user.role === "employee"
         ? user.branchId
@@ -18,25 +47,9 @@ export async function GET() {
 
     const branches = await Branch.find(filter).sort({ createdAt: -1 }).lean();
 
-    return NextResponse.json({
-      success: true,
-      branches,
-    });
+    return NextResponse.json({ success: true, branches });
   } catch (error) {
-    console.error("Error fetching branches:", error);
-
-    const message = error instanceof Error ? error.message : "";
-
-    const status =
-      message === "UNAUTHORIZED" ? 401 : message === "FORBIDDEN" ? 403 : 500;
-
-    return NextResponse.json(
-      {
-        success: false,
-        message: status === 500 ? "Failed to fetch branches" : message,
-      },
-      { status },
-    );
+    return handleError(error, "fetch");
   }
 }
 
@@ -45,47 +58,63 @@ export async function POST(request: Request) {
     await requireBranchManagement();
     await connectDB();
 
-    const body = await request.json();
-    const { name, location, phone } = body;
+    let body: Record<string, unknown>;
 
-    if (!name?.trim()) {
+    try {
+      body = await request.json();
+    } catch {
       return NextResponse.json(
-        {
-          success: false,
-          message: "Branch name is required",
-        },
+        { success: false, message: "Invalid request body." },
         { status: 400 },
       );
     }
 
+    const { name, location, phone } = body;
+
+    if (typeof name !== "string" || !name.trim()) {
+      return NextResponse.json(
+        { success: false, message: "Branch name is required." },
+        { status: 400 },
+      );
+    }
+
+    if (
+      (location !== undefined && typeof location !== "string") ||
+      (phone !== undefined && typeof phone !== "string")
+    ) {
+      return NextResponse.json(
+        { success: false, message: "Location and phone must be text values." },
+        { status: 400 },
+      );
+    }
+
+    const cleanName = name.trim();
+
+    const existingBranch = await Branch.findOne({
+      name: {
+        $regex: `^${cleanName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
+        $options: "i",
+      },
+    }).lean();
+
+    if (existingBranch) {
+      return NextResponse.json(
+        { success: false, message: "A branch with this name already exists." },
+        { status: 409 },
+      );
+    }
+
     const branch = await Branch.create({
-      name: name.trim(),
-      location,
-      phone,
+      name: cleanName,
+      location: typeof location === "string" ? location.trim() : "",
+      phone: typeof phone === "string" ? phone.trim() : "",
     });
 
     return NextResponse.json(
-      {
-        success: true,
-        message: "Branch created successfully",
-        branch,
-      },
+      { success: true, message: "Branch created successfully.", branch },
       { status: 201 },
     );
   } catch (error) {
-    console.error("Error creating branch:", error);
-
-    const message = error instanceof Error ? error.message : "";
-
-    const status =
-      message === "UNAUTHORIZED" ? 401 : message === "FORBIDDEN" ? 403 : 500;
-
-    return NextResponse.json(
-      {
-        success: false,
-        message: status === 500 ? "Failed to create branch" : message,
-      },
-      { status },
-    );
+    return handleError(error, "create");
   }
 }

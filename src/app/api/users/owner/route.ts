@@ -1,7 +1,10 @@
 import { NextResponse } from "next/server";
+
 import connectDB from "@/lib/mongodb";
 import User from "@/models/User";
 import { requireOwner } from "@/lib/permissions";
+
+export const dynamic = "force-dynamic";
 
 export async function GET() {
   try {
@@ -10,17 +13,18 @@ export async function GET() {
 
     const owner = await User.findOne({
       role: "owner",
-    }).select("_id name email role");
+      isActive: true,
+    })
+      .select("_id name email role")
+      .lean();
 
     if (!owner) {
       return NextResponse.json(
         {
           success: false,
-          message: "Owner not found",
+          message: "Active owner account not found.",
         },
-        {
-          status: 404,
-        },
+        { status: 404 },
       );
     }
 
@@ -31,14 +35,34 @@ export async function GET() {
   } catch (error) {
     console.error("Error fetching owner:", error);
 
+    const message = error instanceof Error ? error.message : "";
+
+    if (message === "UNAUTHORIZED") {
+      return NextResponse.json(
+        {
+          success: false,
+          message: "Please log in to continue.",
+        },
+        { status: 401 },
+      );
+    }
+
+    if (message === "FORBIDDEN") {
+      return NextResponse.json(
+        {
+          success: false,
+          message: "Only the owner can access this endpoint.",
+        },
+        { status: 403 },
+      );
+    }
+
     return NextResponse.json(
       {
         success: false,
-        message: "Failed to fetch owner",
+        message: "Failed to fetch owner.",
       },
-      {
-        status: 500,
-      },
+      { status: 500 },
     );
   }
 }
