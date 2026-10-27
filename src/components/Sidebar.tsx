@@ -14,6 +14,9 @@ import {
   Users,
   Settings,
   LogOut,
+  HandCoins,
+  Handshake,
+  Calculator,
 } from "lucide-react";
 
 const menuItems = [
@@ -23,6 +26,21 @@ const menuItems = [
   { label: "Flower Purchases", href: "/flower-purchases", icon: Flower2 },
   { label: "Companies", href: "/companies", icon: Building2 },
   { label: "Purchase Payments", href: "/purchase-payments", icon: Receipt },
+  {
+    label: "Partner-Funded Payments",
+    href: "/partner-funded-payments",
+    icon: HandCoins,
+  },
+  {
+    label: "Settlements",
+    href: "/Settlement",
+    icon: Handshake,
+  },
+  {
+    label: "Final Calculation",
+    href: "/final-calculation",
+    icon: Calculator,
+  },
   { label: "Branches", href: "/branches", icon: Building2 },
   { label: "Reports", href: "/reports", icon: BarChart3 },
   { label: "Users", href: "/users", icon: Users },
@@ -35,6 +53,8 @@ const employeeAllowedRoutes = [
   "/flower-purchases",
   "/companies",
   "/purchase-payments",
+  "/partner-funded-payments",
+  "/Settlement",
 ];
 
 export default function Sidebar() {
@@ -83,8 +103,9 @@ export default function Sidebar() {
     };
   }, [pathname]);
 
-  const visibleMenuItems =
-    !sessionLoaded || role === "employee"
+  const visibleMenuItems = !sessionLoaded
+    ? []
+    : role === "employee"
       ? menuItems.filter((item) => employeeAllowedRoutes.includes(item.href))
       : role === "owner" || role === "admin" || role === "viewer"
         ? menuItems.filter((item) =>
