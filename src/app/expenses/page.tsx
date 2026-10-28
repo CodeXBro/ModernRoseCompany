@@ -23,6 +23,7 @@ interface Expense {
 
 const ownerId = "6abbb773907472cc5ac6f063";
 
+
 export default function ExpensesPage() {
   const [branches, setBranches] = useState<Branch[]>([]);
   const [expenses, setExpenses] = useState<Expense[]>([]);
@@ -36,6 +37,41 @@ export default function ExpensesPage() {
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+
+  async function handleDelete(expense: Expense) {
+    const confirmed = window.confirm(
+      `Are you sure you want to delete this ${expense.category} expense of AED ${Number(expense.amount).toFixed(2)}?`,
+    );
+
+    if (!confirmed) return;
+
+    try {
+      setLoading(true);
+
+      const response = await fetch(`/api/expenses/${expense._id}`, {
+        method: "DELETE",
+      });
+
+      const result = await response.json();
+
+      if (!response.ok || !result.success) {
+        alert(result.message || "Failed to delete expense.");
+        return;
+      }
+
+      if (editingId === expense._id) {
+        resetForm();
+      }
+
+      await fetchExpenses();
+      alert("Expense deleted successfully.");
+    } catch (error) {
+      console.error("Error deleting expense:", error);
+      alert("Something went wrong while deleting the expense.");
+    } finally {
+      setLoading(false);
+    }
+  }
 
   async function fetchBranches() {
     try {
@@ -377,13 +413,25 @@ export default function ExpensesPage() {
                     )}
 
                     <div className="mt-4 border-t border-gray-100 pt-3">
-                      <button
-                        type="button"
-                        onClick={() => handleEdit(expense)}
-                        className="rounded-lg border border-[#253d2f] px-4 py-2 text-sm font-medium text-[#253d2f] hover:bg-[#eef4f0]"
-                      >
-                        Edit
-                      </button>
+                      <div className="mt-4 flex gap-3 border-t border-gray-100 pt-3">
+                        <button
+                          type="button"
+                          onClick={() => handleEdit(expense)}
+                          disabled={loading}
+                          className="rounded-lg border border-[#253d2f] px-4 py-2 text-sm font-medium text-[#253d2f] hover:bg-[#eef4f0] disabled:opacity-50"
+                        >
+                          Edit
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => handleDelete(expense)}
+                          disabled={loading}
+                          className="rounded-lg border border-red-300 px-4 py-2 text-sm font-medium text-red-600 hover:bg-red-50 disabled:opacity-50"
+                        >
+                          Delete
+                        </button>
+                      </div>
                     </div>
                   </div>
                 ))}

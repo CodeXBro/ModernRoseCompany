@@ -1,4 +1,3 @@
-
 import { NextResponse } from "next/server";
 import mongoose from "mongoose";
 
@@ -16,17 +15,11 @@ import {
 
 export const dynamic = "force-dynamic";
 
-const PAYMENT_METHODS = [
-  "cash",
-  "visa",
-  "online",
-  "bank",
-  "other",
-] as const;
+const PAYMENT_METHODS = ["cash", "visa", "online", "bank", "other"] as const;
 
 function calculatePayment(totalAmount: number, paidAmount: number) {
-  if (!Number.isFinite(totalAmount) || totalAmount < 0) {
-    throw new Error("Enter a valid bill amount.");
+  if (!Number.isFinite(totalAmount) || totalAmount <= 0) {
+    throw new Error("Enter a valid bill amount greater than zero.");
   }
 
   if (!Number.isFinite(paidAmount) || paidAmount < 0) {
@@ -37,16 +30,19 @@ function calculatePayment(totalAmount: number, paidAmount: number) {
     throw new Error("Paid amount cannot exceed the bill amount.");
   }
 
-  const balanceAmount = Number((totalAmount - paidAmount).toFixed(2));
+  const total = Number(totalAmount.toFixed(2));
+  const paid = Number(paidAmount.toFixed(2));
+  const balanceAmount = Number((total - paid).toFixed(2));
 
   const paymentStatus: "paid" | "pending" | "partial" =
-    balanceAmount === 0
-      ? "paid"
-      : paidAmount === 0
-        ? "pending"
-        : "partial";
+    balanceAmount === 0 ? "paid" : paid === 0 ? "pending" : "partial";
 
-  return { paidAmount, balanceAmount, paymentStatus };
+  return {
+    totalAmount: total,
+    paidAmount: paid,
+    balanceAmount,
+    paymentStatus,
+  };
 }
 
 function handleError(error: unknown) {
@@ -59,12 +55,12 @@ function handleError(error: unknown) {
     );
   }
 
-  if (
-    message === "FORBIDDEN" ||
-    message.includes("not assigned to a branch")
-  ) {
+  if (message === "FORBIDDEN" || message.includes("not assigned to a branch")) {
     return NextResponse.json(
-      { success: false, message: "You do not have permission to perform this action." },
+      {
+        success: false,
+        message: "You do not have permission to perform this action.",
+      },
       { status: 403 },
     );
   }
@@ -72,7 +68,10 @@ function handleError(error: unknown) {
   console.error("Flower purchases API error:", error);
 
   return NextResponse.json(
-    { success: false, message: "Unable to process flower purchases." },
+    {
+      success: false,
+      message: "Unable to process flower purchases.",
+    },
     { status: 500 },
   );
 }
@@ -94,22 +93,77 @@ function parseDate(value: unknown): Date | null {
   return date;
 }
 
-// GET: List purchases. Employees see only their assigned branch.
+// GET: List purchases with populated company and branch information.
 export async function GET() {
   try {
     const user = await requireAuth();
+
     await connectDB();
 
     const filter: Record<string, unknown> = {};
     applyBranchAccess(user, filter);
 
     const purchases = await FlowerPurchase.find(filter)
-      .populate("companyId", "companyName supplierName")
-      .populate("branchId", "name")
+      .populate({
+        path: "branchId",
+        select: "name",
+      })
+      .populate({
+        path: "companyId",
+        select: "companyName supplierName",
+      })
       .sort({ date: -1, createdAt: -1 })
       .lean();
 
-    return NextResponse.json({ success: true, purchases });
+    // Return plain objects with predictable branch and company shapes.
+    const formattedPurchases = purchases.map((purchase: any) => {
+      const branch =
+        purchase.branchId && typeof purchase.branchId === "object"
+          ? {
+              _id: String(purchase.branchId._id),
+              name: purchase.branchId.name || "",
+            }
+          : purchase.branchId
+            ? {
+                _id: String(purchase.branchId),
+                name: "",
+              }
+            : null;
+
+      const company =
+        purchase.companyId && typeof purchase.companyId === "object"
+          ? {
+              _id: String(purchase.companyId._id),
+              companyName: purchase.companyId.companyName || "",
+              supplierName: purchase.companyId.supplierName || "",
+            }
+          : purchase.companyId
+            ? {
+                _id: String(purchase.companyId),
+                companyName: "",
+                supplierName: "",
+              }
+            : null;
+
+      return {
+        ...purchase,
+        _id: String(purchase._id),
+        branchId: branch,
+        companyId: company,
+      };
+    });
+
+    return NextResponse.json(
+      {
+        success: true,
+        purchases: formattedPurchases,
+      },
+      {
+        headers: {
+          "Cache-Control": "no-store, max-age=0",
+        },
+      },
+    );
   } catch (error) {
     return handleError(error);
   }
@@ -119,6 +173,7 @@ export async function GET() {
 export async function POST(request: Request) {
   try {
     const user = await requireWriteAccess();
+
     await connectDB();
 
     let body: Record<string, unknown>;
@@ -143,26 +198,28 @@ export async function POST(request: Request) {
       notes,
     } = body;
 
-    // Employees must use their assigned branch. Do not trust their
-    // submitted branch ID.
     let selectedBranchId: string;
 
+    // Employees must use their assigned branch.
     if (user.role === "employee") {
       if (!user.branchId) {
         return NextResponse.json(
-          { success: false, message: "Your account is not assigned to a branch." },
+          {
+            success: false,
+            message: "Your account is not assigned to a branch.",
+          },
           { status: 403 },
         );
       }
 
-      selectedBranchId = user.branchId;
+      selectedBranchId = String(user.branchId);
     } else {
-      if (
-        typeof branchId !== "string" ||
-        !mongoose.isValidObjectId(branchId)
-      ) {
+      if (typeof branchId !== "string" || !mongoose.isValidObjectId(branchId)) {
         return NextResponse.json(
-          { success: false, message: "A valid branch is required." },
+          {
+            success: false,
+            message: "A valid branch is required.",
+          },
           { status: 400 },
         );
       }
@@ -170,21 +227,24 @@ export async function POST(request: Request) {
       selectedBranchId = branchId;
     }
 
-    const purchaseDate = parseDate(date);
-
-    if (!purchaseDate) {
+    if (typeof companyId !== "string" || !mongoose.isValidObjectId(companyId)) {
       return NextResponse.json(
-        { success: false, message: "Enter a valid purchase date in YYYY-MM-DD format." },
+        {
+          success: false,
+          message: "A valid company is required.",
+        },
         { status: 400 },
       );
     }
 
-    if (
-      typeof companyId !== "string" ||
-      !mongoose.isValidObjectId(companyId)
-    ) {
+    const purchaseDate = parseDate(date);
+
+    if (!purchaseDate) {
       return NextResponse.json(
-        { success: false, message: "A valid company is required." },
+        {
+          success: false,
+          message: "Enter a valid purchase date in YYYY-MM-DD format.",
+        },
         { status: 400 },
       );
     }
@@ -192,39 +252,30 @@ export async function POST(request: Request) {
     if (
       totalAmount === undefined ||
       totalAmount === null ||
-      totalAmount === ""
-    ) {
-      return NextResponse.json(
-        { success: false, message: "Bill amount is required." },
-        { status: 400 },
-      );
-    }
-
-    if (
+      totalAmount === "" ||
       paidAmount === undefined ||
       paidAmount === null ||
       paidAmount === ""
     ) {
       return NextResponse.json(
-        { success: false, message: "Paid amount is required." },
+        {
+          success: false,
+          message: "Bill amount and paid amount are required.",
+        },
         { status: 400 },
       );
     }
 
-    const total = Number(totalAmount);
-    const paid = Number(paidAmount);
-
     let payment;
 
     try {
-      payment = calculatePayment(total, paid);
+      payment = calculatePayment(Number(totalAmount), Number(paidAmount));
     } catch (error) {
       return NextResponse.json(
         {
           success: false,
-          message: error instanceof Error
-            ? error.message
-            : "Invalid payment amounts.",
+          message:
+            error instanceof Error ? error.message : "Invalid payment amounts.",
         },
         { status: 400 },
       );
@@ -237,7 +288,10 @@ export async function POST(request: Request) {
       )
     ) {
       return NextResponse.json(
-        { success: false, message: "Select a valid payment method." },
+        {
+          success: false,
+          message: "Select a valid payment method.",
+        },
         { status: 400 },
       );
     }
@@ -262,7 +316,10 @@ export async function POST(request: Request) {
 
     if (!company.isActive) {
       return NextResponse.json(
-        { success: false, message: "This company is inactive and cannot be selected." },
+        {
+          success: false,
+          message: "This company is inactive and cannot be selected.",
+        },
         { status: 400 },
       );
     }
@@ -274,20 +331,22 @@ export async function POST(request: Request) {
       supplierName: company.supplierName,
       invoiceNumber:
         typeof invoiceNumber === "string" ? invoiceNumber.trim() : "",
-      totalAmount: total,
-      paidAmount: payment.paidAmount,
-      balanceAmount: payment.balanceAmount,
-      paymentStatus: payment.paymentStatus,
+      ...payment,
       paymentMethod,
       notes: typeof notes === "string" ? notes.trim() : "",
       createdBy: user.id,
     });
 
+    const populatedPurchase = await FlowerPurchase.findById(purchase._id)
+      .populate("branchId", "name")
+      .populate("companyId", "companyName supplierName")
+      .lean();
+
     return NextResponse.json(
       {
         success: true,
         message: "Flower purchase added successfully.",
-        purchase,
+        purchase: populatedPurchase,
       },
       { status: 201 },
     );

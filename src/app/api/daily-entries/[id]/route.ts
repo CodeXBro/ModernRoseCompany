@@ -39,6 +39,84 @@ function handleError(error: unknown) {
   );
 }
 
+export async function DELETE(_request: Request, { params }: RouteParams) {
+  try {
+    const user = await requireWriteAccess();
+    await connectDB();
+
+    const { id } = await params;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return NextResponse.json(
+        { success: false, message: "Invalid daily entry ID." },
+        { status: 400 },
+      );
+    }
+
+    const entry = await DailyEntry.findById(id);
+
+    if (!entry) {
+      return NextResponse.json(
+        { success: false, message: "Daily entry not found." },
+        { status: 404 },
+      );
+    }
+
+    // Employees can delete entries only from their assigned branch.
+    if (user.role === "employee") {
+      const filter: Record<string, unknown> = {};
+      applyBranchAccess(user, filter);
+
+      if (String(entry.branchId) !== String(filter.branchId)) {
+        return NextResponse.json(
+          {
+            success: false,
+            message: "You can only delete entries from your assigned branch.",
+          },
+          { status: 403 },
+        );
+      }
+    }
+
+    await DailyEntry.findByIdAndDelete(id);
+
+    return NextResponse.json({
+      success: true,
+      message: "Daily entry deleted successfully.",
+    });
+  } catch (error) {
+    console.error("Error deleting daily entry:", error);
+
+    const message =
+      error instanceof Error ? error.message : "Failed to delete daily entry.";
+
+    if (message === "UNAUTHORIZED") {
+      return NextResponse.json(
+        { success: false, message: "Please log in to continue." },
+        { status: 401 },
+      );
+    }
+
+    if (
+      message === "FORBIDDEN" ||
+      message.includes("not assigned to a branch")
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: "You do not have permission to access this branch.",
+        },
+        { status: 403 },
+      );
+    }
+
+    return NextResponse.json(
+      { success: false, message: "Failed to delete daily entry." },
+      { status: 500 },
+    );
+  }
+}
+
 export async function PUT(request: Request, { params }: RouteParams) {
   try {
     const user = await requireWriteAccess();

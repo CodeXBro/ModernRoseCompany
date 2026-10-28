@@ -3,663 +3,782 @@
 import { useEffect, useState } from "react";
 import jsPDF from "jspdf";
 
-interface Branch {
+type ReportType = "daily" | "weekly" | "monthly" | "custom";
+
+type Branch = {
   _id: string;
-  name: string;
-  isActive: boolean;
+  id?: string;
+  name?: string;
+  branchName?: string;
+};
+
+type ReportData = Record<string, any>;
+
+function getToday(): string {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+
+  return `${year}-${month}-${day}`;
 }
 
-interface ProfitReport {
-  startDate?: string;
-  endDate?: string;
-  date?: string;
-  branchId: string;
+function formatDate(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
 
-  income: {
-    cash: number;
-    visa: number;
-    online: number;
-    other: number;
-    total: number;
-  };
-
-  expenses: {
-    general: number;
-    flowerPurchases: number;
-    total: number;
-  };
-
-  netProfit: number;
+  return `${year}-${month}-${day}`;
 }
 
-type ReportType = "daily" | "weekly" | "monthly" | "range";
+function isValidDateString(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
 
-export default function ReportsPage() {
-  const [branches, setBranches] = useState<Branch[]>([]);
+  const [year, month, day] = value.split("-").map(Number);
+  const parsedDate = new Date(Date.UTC(year, month - 1, day));
 
-  const [reportType, setReportType] = useState<ReportType>("daily");
+  return (
+    parsedDate.getUTCFullYear() === year &&
+    parsedDate.getUTCMonth() === month - 1 &&
+    parsedDate.getUTCDate() === day
+  );
+}
 
-  const [date, setDate] = useState("2026-09-30");
+function getWeekDates(dateString: string) {
+  const selected = new Date(`${dateString}T12:00:00`);
+  const day = selected.getDay();
+  const mondayOffset = day === 0 ? -6 : 1 - day;
 
-  const [startDate, setStartDate] = useState("2026-09-01");
+  const monday = new Date(selected);
+  monday.setDate(selected.getDate() + mondayOffset);
 
-  const [endDate, setEndDate] = useState("2026-09-30");
+  const sunday = new Date(monday);
+  sunday.setDate(monday.getDate() + 6);
 
-  const [branchId, setBranchId] = useState("");
+  return {
+    start: formatDate(monday),
+    end: formatDate(sunday),
+  };
+}
 
-  const [report, setReport] = useState<ProfitReport | null>(null);
+function getMonthDates(dateString: string) {
+  const selected = new Date(`${dateString}T12:00:00`);
+  const firstDay = new Date(selected.getFullYear(), selected.getMonth(), 1);
+  const lastDay = new Date(selected.getFullYear(), selected.getMonth() + 1, 0);
 
-  const [loading, setLoading] = useState(false);
+  return {
+    start: formatDate(firstDay),
+    end: formatDate(lastDay),
+  };
+}
 
-  const [downloading, setDownloading] = useState(false);
+function formatMoney(value: unknown): string {
+  const number = Number(value ?? 0);
 
-  function formatDate(dateValue: Date) {
-    const year = dateValue.getFullYear();
+  return `AED ${
+    Number.isFinite(number)
+      ? number.toLocaleString("en-AE", {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        })
+      : "0.00"
+  }`;
+}
 
-    const month = String(dateValue.getMonth() + 1).padStart(2, "0");
+function getAmount(report: ReportData | null, keys: string[]): number {
+  if (!report) return 0;
 
-    const day = String(dateValue.getDate()).padStart(2, "0");
+  const containers = [
+    report,
+    report.income,
+    report.summary,
+    report.totals,
+    report.data,
+    report.data?.income,
+    report.report,
+    report.report?.income,
+    report.summary?.income,
+    report.totals?.income,
+  ];
 
-    return `${year}-${month}-${day}`;
-  }
+  for (const container of containers) {
+    if (!container || typeof container !== "object") continue;
 
-  function getWeekDates() {
-    const today = new Date();
+    for (const key of keys) {
+      const value = container[key];
 
-    const day = today.getDay();
-
-    const difference = day === 0 ? -6 : 1 - day;
-
-    const monday = new Date(today);
-
-    monday.setDate(today.getDate() + difference);
-
-    const sunday = new Date(monday);
-
-    sunday.setDate(monday.getDate() + 6);
-
-    return {
-      start: formatDate(monday),
-      end: formatDate(sunday),
-    };
-  }
-
-  function getMonthDates() {
-    const today = new Date();
-
-    const firstDay = new Date(today.getFullYear(), today.getMonth(), 1);
-
-    const lastDay = new Date(today.getFullYear(), today.getMonth() + 1, 0);
-
-    return {
-      start: formatDate(firstDay),
-      end: formatDate(lastDay),
-    };
-  }
-
-  async function fetchBranches() {
-    try {
-      const response = await fetch("/api/branches");
-
-      const data = await response.json();
-
-      if (data.success) {
-        const activeBranches = data.branches.filter(
-          (branch: Branch) => branch.isActive,
-        );
-
-        setBranches(activeBranches);
+      if (value === undefined || value === null || value === "") {
+        continue;
       }
-    } catch (error) {
-      console.error("Error fetching branches:", error);
+
+      const amount =
+        typeof value === "object"
+          ? (value.amount ?? value.value ?? value.total)
+          : value;
+
+      if (amount === undefined || amount === null || amount === "") {
+        continue;
+      }
+
+      const number = Number(amount);
+
+      if (Number.isFinite(number)) return number;
     }
   }
 
-  async function fetchReport() {
-    try {
-      setLoading(true);
+  return 0;
+}
 
-      let url = "";
+/**
+ * Supports the daily API response:
+ * report.expenses.flowerPurchases
+ *
+ * Also supports common date-range API response shapes.
+ * General expenses are deliberately excluded.
+ */
+function getFlowerPurchases(report: ReportData | null): number {
+  if (!report) return 0;
+
+  const candidates = [
+    report.expenses?.flowerPurchases,
+    report.expenses?.purchases,
+    report.flowerPurchases,
+    report.totalPurchases,
+    report.purchaseTotal,
+    report.totalPurchase,
+    report.summary?.flowerPurchases,
+    report.summary?.totalPurchases,
+    report.totals?.flowerPurchases,
+    report.totals?.totalPurchases,
+    report.data?.expenses?.flowerPurchases,
+    report.data?.expenses?.purchases,
+    report.data?.flowerPurchases,
+    report.data?.totalPurchases,
+    report.report?.expenses?.flowerPurchases,
+    report.report?.expenses?.purchases,
+    report.report?.flowerPurchases,
+    report.report?.totalPurchases,
+    report.report?.summary?.flowerPurchases,
+    report.report?.totals?.flowerPurchases,
+  ];
+
+  for (const value of candidates) {
+    if (value === undefined || value === null || value === "") continue;
+
+    const amount =
+      typeof value === "object"
+        ? (value.amount ?? value.value ?? value.total)
+        : value;
+
+    if (amount === undefined || amount === null || amount === "") continue;
+
+    const number = Number(amount);
+
+    if (Number.isFinite(number)) return number;
+  }
+
+  return getAmount(report, [
+    "flowerPurchaseTotal",
+    "totalFlowerPurchases",
+    "totalPurchases",
+    "purchaseTotal",
+    "totalPurchase",
+  ]);
+}
+
+export default function ReportsPage() {
+  const today = getToday();
+
+  const [branches, setBranches] = useState<Branch[]>([]);
+  const [reportType, setReportType] = useState<ReportType>("daily");
+  const [date, setDate] = useState(today);
+  const [startDate, setStartDate] = useState(today);
+  const [endDate, setEndDate] = useState(today);
+  const [branchId, setBranchId] = useState("");
+
+  const [report, setReport] = useState<ReportData | null>(null);
+  const [loadingBranches, setLoadingBranches] = useState(true);
+  const [loading, setLoading] = useState(false);
+  const [downloading, setDownloading] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function fetchBranches() {
+      setLoadingBranches(true);
+
+      try {
+        const response = await fetch("/api/branches", {
+          cache: "no-store",
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(data.message || "Failed to load branches.");
+        }
+
+        const branchList = Array.isArray(data)
+          ? data
+          : (data.branches ?? data.data ?? []);
+
+        if (!cancelled) {
+          setBranches(Array.isArray(branchList) ? branchList : []);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          console.error("Branch loading error:", err);
+        }
+      } finally {
+        if (!cancelled) setLoadingBranches(false);
+      }
+    }
+
+    fetchBranches();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function fetchReport() {
+    setError("");
+
+    if (reportType !== "custom" && !isValidDateString(date)) {
+      setError("Please select a valid date.");
+      return;
+    }
+
+    if (reportType === "custom") {
+      if (!isValidDateString(startDate) || !isValidDateString(endDate)) {
+        setError("Please select valid start and end dates.");
+        return;
+      }
+
+      if (startDate > endDate) {
+        setError("Start date cannot be after end date.");
+        return;
+      }
+    }
+
+    setLoading(true);
+    setReport(null);
+
+    try {
+      let url: string;
 
       if (reportType === "daily") {
-        if (!date) {
-          alert("Please select a date");
-          return;
+        const params = new URLSearchParams();
+        params.set("date", date);
+
+        if (branchId) params.set("branchId", branchId);
+
+        url = `/api/reports/profit?${params.toString()}`;
+      } else {
+        let rangeStart = startDate;
+        let rangeEnd = endDate;
+
+        if (reportType === "weekly") {
+          const range = getWeekDates(date);
+          rangeStart = range.start;
+          rangeEnd = range.end;
         }
 
-        url = `/api/reports/profit?date=${date}`;
-      }
-
-      if (reportType === "weekly") {
-        const week = getWeekDates();
-
-        url = `/api/reports/date-range?startDate=${week.start}&endDate=${week.end}`;
-      }
-
-      if (reportType === "monthly") {
-        const month = getMonthDates();
-
-        url = `/api/reports/date-range?startDate=${month.start}&endDate=${month.end}`;
-      }
-
-      if (reportType === "range") {
-        if (!startDate || !endDate) {
-          alert("Please select start and end dates");
-          return;
+        if (reportType === "monthly") {
+          const range = getMonthDates(date);
+          rangeStart = range.start;
+          rangeEnd = range.end;
         }
 
-        if (startDate > endDate) {
-          alert("Start date cannot be after end date");
-          return;
+        if (!isValidDateString(rangeStart) || !isValidDateString(rangeEnd)) {
+          throw new Error("Please select valid report dates.");
         }
 
-        url = `/api/reports/date-range?startDate=${startDate}&endDate=${endDate}`;
+        const params = new URLSearchParams();
+        params.set("startDate", rangeStart);
+        params.set("endDate", rangeEnd);
+
+        if (branchId) params.set("branchId", branchId);
+
+        url = `/api/reports/date-range?${params.toString()}`;
       }
 
-      if (branchId) {
-        url += `&branchId=${branchId}`;
-      }
-
-      const response = await fetch(url);
+      const response = await fetch(url, {
+        method: "GET",
+        cache: "no-store",
+      });
 
       const data = await response.json();
 
       if (!response.ok) {
-        alert(data.message || "Failed to load report");
-
-        return;
+        throw new Error(
+          data.message || data.error || "Failed to generate report.",
+        );
       }
 
-      if (data.success) {
-        setReport(data.report);
-      }
-    } catch (error) {
-      console.error("Error fetching report:", error);
+      const reportData = data.report ?? data.data ?? data.result ?? data;
 
-      alert("Something went wrong");
+      setReport(reportData);
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Something went wrong while generating the report.",
+      );
     } finally {
       setLoading(false);
     }
   }
 
-  function getBranchName() {
-    if (!branchId) {
-      return "All Branches";
-    }
+  const totalCash = getAmount(report, [
+    "cash",
+    "totalCash",
+    "cashIncome",
+    "incomeCash",
+    "cashAmount",
+  ]);
 
-    return branches.find((branch) => branch._id === branchId)?.name || "Branch";
-  }
+  const totalVisa = getAmount(report, [
+    "visa",
+    "totalVisa",
+    "visaIncome",
+    "incomeVisa",
+    "visaAmount",
+  ]);
 
-  function getReportTitle() {
-    if (reportType === "daily") {
-      return "Daily Financial Report";
-    }
+  const totalOnline = getAmount(report, [
+    "online",
+    "totalOnline",
+    "onlineIncome",
+    "incomeOnline",
+    "onlineAmount",
+  ]);
+
+  const totalOther = getAmount(report, [
+    "other",
+    "totalOther",
+    "otherIncome",
+    "incomeOther",
+    "otherAmount",
+  ]);
+
+  const totalIncome = getAmount(report, [
+    "totalIncome",
+    "total",
+    "incomeTotal",
+    "totalSales",
+    "grandTotal",
+  ]);
+
+  const totalPurchases = getFlowerPurchases(report);
+
+  // Net profit = income minus flower purchases only.
+  // General expenses are not deducted.
+  const netProfit = totalIncome - totalPurchases;
+
+  function getReportPeriod(): string {
+    if (reportType === "daily") return date;
 
     if (reportType === "weekly") {
-      return "Weekly Financial Report";
+      const range = getWeekDates(date);
+      return `${range.start} to ${range.end}`;
     }
 
     if (reportType === "monthly") {
-      return "Monthly Financial Report";
-    }
-
-    return "Date Range Financial Report";
-  }
-
-  function getReportDateText() {
-    if (reportType === "daily") {
-      return report?.date || date;
-    }
-
-    if (report?.startDate && report?.endDate) {
-      return `${report.startDate} to ${report.endDate}`;
-    }
-
-    if (reportType === "weekly") {
-      const week = getWeekDates();
-
-      return `${week.start} to ${week.end}`;
-    }
-
-    if (reportType === "monthly") {
-      const month = getMonthDates();
-
-      return `${month.start} to ${month.end}`;
+      const range = getMonthDates(date);
+      return `${range.start} to ${range.end}`;
     }
 
     return `${startDate} to ${endDate}`;
   }
 
-  function printReport() {
-    window.print();
+  function getSelectedBranchName(): string {
+    if (!branchId) return "All branches";
+
+    const branch = branches.find((item) => (item._id ?? item.id) === branchId);
+
+    return branch?.name ?? branch?.branchName ?? "Selected branch";
   }
 
-  async function downloadPDF() {
+  function downloadPDF() {
     if (!report) {
-      alert("Report is not available");
+      setError("Please generate a report before downloading.");
       return;
     }
 
+    setDownloading(true);
+
     try {
-      setDownloading(true);
+      const pdf = new jsPDF();
 
-      const pdf = new jsPDF("p", "mm", "a4");
+      pdf.setFontSize(18);
+      pdf.text("Modern Rose - Financial Report", 14, 20);
 
-      const pageWidth = pdf.internal.pageSize.getWidth();
-
-      const money = (amount: number) => `AED ${amount.toFixed(2)}`;
-
-      const branchName = getBranchName();
-
-      pdf.setFontSize(22);
-      pdf.setFont("helvetica", "bold");
-
-      pdf.text("Modern Rose", 20, 25);
+      pdf.setFontSize(11);
+      pdf.text(`Report type: ${reportType}`, 14, 32);
+      pdf.text(`Period: ${getReportPeriod()}`, 14, 40);
+      pdf.text(`Branch: ${getSelectedBranchName()}`, 14, 48);
 
       pdf.setFontSize(12);
-      pdf.setFont("helvetica", "normal");
 
-      pdf.text(getReportTitle(), 20, 33);
+      const rows = [
+        ["Total income", formatMoney(totalIncome)],
+        ["Cash income", formatMoney(totalCash)],
+        ["Visa income", formatMoney(totalVisa)],
+        ["Online income", formatMoney(totalOnline)],
+        ["Other income", formatMoney(totalOther)],
+        ["Flower purchases", formatMoney(totalPurchases)],
+        ["Net profit", formatMoney(netProfit)],
+      ];
 
-      pdf.setFontSize(11);
+      let y = 64;
 
-      pdf.text(`Date: ${getReportDateText()}`, 20, 45);
+      rows.forEach(([label, value]) => {
+        pdf.text(label, 14, y);
+        pdf.text(value, 196, y, { align: "right" });
+        y += 10;
+      });
 
-      pdf.text(`Branch: ${branchName}`, 20, 52);
-
-      pdf.line(20, 58, pageWidth - 20, 58);
-
-      pdf.setFontSize(14);
-
-      pdf.setFont("helvetica", "bold");
-
-      pdf.text("Financial Summary", 20, 70);
-
-      pdf.setFontSize(11);
-
-      pdf.setFont("helvetica", "normal");
-
-      pdf.text(`Total Income: ${money(report.income.total)}`, 25, 80);
-
-      pdf.text(`Total Expenses: ${money(report.expenses.total)}`, 25, 88);
-
-      pdf.text(`Net Profit: ${money(report.netProfit)}`, 25, 96);
-
-      pdf.setFontSize(14);
-
-      pdf.setFont("helvetica", "bold");
-
-      pdf.text("Income Breakdown", 20, 112);
-
-      pdf.setFontSize(11);
-
-      pdf.setFont("helvetica", "normal");
-
-      pdf.text(`Cash: ${money(report.income.cash)}`, 25, 122);
-
-      pdf.text(`Visa Machine: ${money(report.income.visa)}`, 25, 130);
-
-      pdf.text(`Online: ${money(report.income.online)}`, 25, 138);
-
-      pdf.text(`Other: ${money(report.income.other)}`, 25, 146);
-
-      pdf.text(`Total Income: ${money(report.income.total)}`, 25, 156);
-
-      pdf.setFontSize(14);
-
-      pdf.setFont("helvetica", "bold");
-
-      pdf.text("Expense Breakdown", 20, 172);
-
-      pdf.setFontSize(11);
-
-      pdf.setFont("helvetica", "normal");
-
-      pdf.text(`General Expenses: ${money(report.expenses.general)}`, 25, 182);
-
-      pdf.text(
-        `Flower Purchases: ${money(report.expenses.flowerPurchases)}`,
-        25,
-        190,
-      );
-
-      pdf.text(`Total Expenses: ${money(report.expenses.total)}`, 25, 200);
-
-      pdf.line(20, 210, pageWidth - 20, 210);
-
-      pdf.setFontSize(16);
-
-      pdf.setFont("helvetica", "bold");
-
-      pdf.text(`Net Profit: ${money(report.netProfit)}`, 20, 222);
-
-      pdf.setFontSize(9);
-
-      pdf.setFont("helvetica", "normal");
-
-      pdf.text("Generated by Modern Rose Management System", 20, 280);
-
-      const fileDate =
-        reportType === "daily"
-          ? report.date
-          : `${report.startDate}-to-${report.endDate}`;
-
-      pdf.save(`Modern-Rose-Report-${fileDate}-${branchName}.pdf`);
-    } catch (error) {
-      console.error("Error downloading PDF:", error);
-
-      alert("Failed to download PDF");
+      pdf.save(`modern-rose-report-${getToday()}.pdf`);
+    } catch (err) {
+      console.error("PDF download error:", err);
+      setError("Could not create the PDF. Please try again.");
     } finally {
       setDownloading(false);
     }
   }
 
-  useEffect(() => {
-    fetchBranches();
-  }, []);
+  function printReport() {
+    if (!report) {
+      setError("Please generate a report before printing.");
+      return;
+    }
 
-  useEffect(() => {
-    fetchReport();
-  }, [reportType, date, startDate, endDate, branchId]);
+    window.print();
+  }
 
   return (
-    <main className="min-h-screen bg-[#f7f7f8] p-8">
-      <div className="mx-auto max-w-6xl">
-        {/* Header */}
-        <div className="mb-8">
-          <h1 className="text-3xl font-bold text-[#253d2f]">Reports</h1>
-
-          <p className="mt-1 text-gray-500">View income, expenses and profit</p>
+    <main className="mx-auto max-w-7xl space-y-6 p-4 md:p-6">
+      <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">Reports</h1>
+          <p className="mt-1 text-sm text-gray-500">
+            Review income, flower purchases, and net profit.
+          </p>
         </div>
 
-        {/* Filters */}
-        <div className="mb-8 rounded-xl border border-gray-200 bg-white p-6 print:hidden">
-          {/* Report Types */}
-          <div className="mb-6 flex flex-wrap gap-3">
+        <div className="flex flex-wrap gap-2 print:hidden">
+          <button
+            type="button"
+            onClick={printReport}
+            disabled={!report}
+            className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            Print
+          </button>
+
+          <button
+            type="button"
+            onClick={downloadPDF}
+            disabled={!report || downloading}
+            className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {downloading ? "Preparing PDF..." : "Download PDF"}
+          </button>
+        </div>
+      </div>
+
+      <section className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm md:p-6 print:hidden">
+        <h2 className="mb-4 text-lg font-semibold text-gray-900">
+          Report filters
+        </h2>
+
+        <div className="mb-5 grid grid-cols-2 gap-2 md:grid-cols-4">
+          {(
+            [
+              ["daily", "Daily"],
+              ["weekly", "Weekly"],
+              ["monthly", "Monthly"],
+              ["custom", "Custom range"],
+            ] as [ReportType, string][]
+          ).map(([value, label]) => (
             <button
+              key={value}
               type="button"
-              onClick={() => setReportType("daily")}
-              className={`rounded-lg px-5 py-3 text-sm font-medium ${
-                reportType === "daily"
-                  ? "bg-[#253d2f] text-white"
-                  : "bg-gray-100 text-gray-700"
+              onClick={() => {
+                setReportType(value);
+                setReport(null);
+                setError("");
+              }}
+              className={`rounded-lg border px-3 py-3 text-sm font-medium ${
+                reportType === value
+                  ? "border-green-700 bg-green-700 text-white"
+                  : "border-gray-300 bg-white text-gray-700 hover:bg-gray-50"
               }`}
             >
-              Daily
+              {label}
             </button>
+          ))}
+        </div>
 
-            <button
-              type="button"
-              onClick={() => setReportType("weekly")}
-              className={`rounded-lg px-5 py-3 text-sm font-medium ${
-                reportType === "weekly"
-                  ? "bg-[#253d2f] text-white"
-                  : "bg-gray-100 text-gray-700"
-              }`}
-            >
-              Weekly
-            </button>
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+          {reportType !== "custom" && (
+            <div>
+              <label
+                htmlFor="report-date"
+                className="mb-1 block text-sm font-medium text-gray-700"
+              >
+                {reportType === "daily"
+                  ? "Report date"
+                  : reportType === "weekly"
+                    ? "Choose a date in the week"
+                    : "Choose a date in the month"}
+              </label>
 
-            <button
-              type="button"
-              onClick={() => setReportType("monthly")}
-              className={`rounded-lg px-5 py-3 text-sm font-medium ${
-                reportType === "monthly"
-                  ? "bg-[#253d2f] text-white"
-                  : "bg-gray-100 text-gray-700"
-              }`}
-            >
-              Monthly
-            </button>
+              <input
+                id="report-date"
+                type="date"
+                value={date}
+                onChange={(event) => setDate(event.target.value)}
+                className="w-full rounded-lg border border-gray-300 px-3 py-2"
+              />
+            </div>
+          )}
 
-            <button
-              type="button"
-              onClick={() => setReportType("range")}
-              className={`rounded-lg px-5 py-3 text-sm font-medium ${
-                reportType === "range"
-                  ? "bg-[#253d2f] text-white"
-                  : "bg-gray-100 text-gray-700"
-              }`}
-            >
-              Custom Range
-            </button>
-          </div>
-
-          {/* Date and Branch Filters */}
-          <div className="grid gap-4 md:grid-cols-3">
-            {reportType === "daily" && (
+          {reportType === "custom" && (
+            <>
               <div>
-                <label className="mb-1 block text-sm font-medium">Date</label>
+                <label
+                  htmlFor="start-date"
+                  className="mb-1 block text-sm font-medium text-gray-700"
+                >
+                  Start date
+                </label>
 
                 <input
+                  id="start-date"
                   type="date"
-                  value={date}
-                  onChange={(event) => setDate(event.target.value)}
-                  className="w-full rounded-lg border border-gray-300 px-4 py-3"
+                  value={startDate}
+                  onChange={(event) => setStartDate(event.target.value)}
+                  className="w-full rounded-lg border border-gray-300 px-3 py-2"
                 />
               </div>
-            )}
 
-            {reportType === "range" && (
-              <>
-                <div>
-                  <label className="mb-1 block text-sm font-medium">
-                    Start Date
-                  </label>
+              <div>
+                <label
+                  htmlFor="end-date"
+                  className="mb-1 block text-sm font-medium text-gray-700"
+                >
+                  End date
+                </label>
 
-                  <input
-                    type="date"
-                    value={startDate}
-                    onChange={(event) => setStartDate(event.target.value)}
-                    className="w-full rounded-lg border border-gray-300 px-4 py-3"
-                  />
-                </div>
+                <input
+                  id="end-date"
+                  type="date"
+                  value={endDate}
+                  min={startDate}
+                  onChange={(event) => setEndDate(event.target.value)}
+                  className="w-full rounded-lg border border-gray-300 px-3 py-2"
+                />
+              </div>
+            </>
+          )}
 
-                <div>
-                  <label className="mb-1 block text-sm font-medium">
-                    End Date
-                  </label>
+          <div>
+            <label
+              htmlFor="branch"
+              className="mb-1 block text-sm font-medium text-gray-700"
+            >
+              Branch
+            </label>
 
-                  <input
-                    type="date"
-                    value={endDate}
-                    onChange={(event) => setEndDate(event.target.value)}
-                    className="w-full rounded-lg border border-gray-300 px-4 py-3"
-                  />
-                </div>
-              </>
-            )}
+            <select
+              id="branch"
+              value={branchId}
+              onChange={(event) => setBranchId(event.target.value)}
+              disabled={loadingBranches}
+              className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2"
+            >
+              <option value="">All branches</option>
 
-            <div>
-              <label className="mb-1 block text-sm font-medium">Branch</label>
+              {branches.map((branch) => {
+                const id = branch._id ?? branch.id ?? "";
 
-              <select
-                value={branchId}
-                onChange={(event) => setBranchId(event.target.value)}
-                className="w-full rounded-lg border border-gray-300 px-4 py-3"
-              >
-                <option value="">All Branches</option>
-
-                {branches.map((branch) => (
-                  <option key={branch._id} value={branch._id}>
-                    {branch.name}
+                return (
+                  <option key={id} value={id}>
+                    {branch.name ?? branch.branchName ?? "Branch"}
                   </option>
-                ))}
-              </select>
-            </div>
+                );
+              })}
+            </select>
           </div>
+        </div>
 
+        {error && (
+          <div
+            role="alert"
+            className="mt-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700"
+          >
+            {error}
+          </div>
+        )}
+
+        <div className="mt-5 flex flex-wrap gap-3">
           <button
             type="button"
             onClick={fetchReport}
             disabled={loading}
-            className="mt-5 rounded-lg bg-[#253d2f] px-6 py-3 font-medium text-white disabled:opacity-50"
+            className="rounded-lg bg-green-700 px-5 py-2.5 font-medium text-white hover:bg-green-800 disabled:cursor-not-allowed disabled:opacity-60"
           >
-            {loading ? "Loading..." : "Generate Report"}
+            {loading ? "Generating..." : "Generate Report"}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setReport(null);
+              setError("");
+            }}
+            className="rounded-lg border border-gray-300 px-5 py-2.5 font-medium text-gray-700 hover:bg-gray-50"
+          >
+            Clear report
           </button>
         </div>
+      </section>
 
-        {/* Report */}
-        {report && (
-          <div id="report-content">
-            {/* Report Header */}
-            <div className="mb-6 rounded-xl border border-gray-200 bg-white p-6">
-              <h2 className="text-2xl font-bold text-[#253d2f]">Modern Rose</h2>
+      {loading && (
+        <div className="rounded-xl border border-gray-200 bg-white p-8 text-center text-gray-600">
+          Generating report...
+        </div>
+      )}
 
-              <p className="mt-1 text-gray-500">{getReportTitle()}</p>
+      {!loading && report && (
+        <section className="space-y-5">
+          <div className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm md:p-6">
+            <h2 className="text-xl font-semibold text-gray-900">
+              Financial summary
+            </h2>
 
-              <div className="mt-4 grid gap-2 text-sm md:grid-cols-2">
-                <p>
-                  <span className="font-medium">Date:</span>{" "}
-                  {getReportDateText()}
-                </p>
-
-                <p>
-                  <span className="font-medium">Branch:</span> {getBranchName()}
-                </p>
-              </div>
+            <div className="mt-2 space-y-1 text-sm text-gray-500">
+              <p>Period: {getReportPeriod()}</p>
+              <p>Branch: {getSelectedBranchName()}</p>
             </div>
 
-            {/* Actions */}
-            <div className="mb-6 flex flex-wrap gap-3 print:hidden">
-              <button
-                type="button"
-                onClick={printReport}
-                className="rounded-lg border border-gray-300 bg-white px-5 py-3 font-medium text-gray-700 hover:bg-gray-50"
-              >
-                Print Report
-              </button>
+            <div className="mt-5 grid grid-cols-1 gap-4 sm:grid-cols-3">
+              <SummaryCard
+                title="Total income"
+                amount={formatMoney(totalIncome)}
+              />
 
-              <button
-                type="button"
-                onClick={downloadPDF}
-                disabled={downloading}
-                className="rounded-lg bg-[#253d2f] px-5 py-3 font-medium text-white disabled:opacity-50"
-              >
-                {downloading ? "Creating PDF..." : "Download PDF"}
-              </button>
-            </div>
+              <SummaryCard
+                title="Flower purchases"
+                amount={formatMoney(totalPurchases)}
+              />
 
-            {/* Summary */}
-            <div className="mb-8 grid gap-4 md:grid-cols-3">
-              <div className="rounded-xl border border-gray-200 bg-white p-6">
-                <p className="text-sm text-gray-500">Total Income</p>
-
-                <p className="mt-2 text-2xl font-bold text-[#253d2f]">
-                  AED {report.income.total.toFixed(2)}
-                </p>
-              </div>
-
-              <div className="rounded-xl border border-gray-200 bg-white p-6">
-                <p className="text-sm text-gray-500">Total Expenses</p>
-
-                <p className="mt-2 text-2xl font-bold text-red-600">
-                  AED {report.expenses.total.toFixed(2)}
-                </p>
-              </div>
-
-              <div className="rounded-xl border border-gray-200 bg-white p-6">
-                <p className="text-sm text-gray-500">Net Profit</p>
-
-                <p
-                  className={`mt-2 text-2xl font-bold ${
-                    report.netProfit >= 0 ? "text-green-700" : "text-red-700"
-                  }`}
-                >
-                  AED {report.netProfit.toFixed(2)}
-                </p>
-              </div>
-            </div>
-
-            {/* Breakdown */}
-            <div className="grid gap-8 lg:grid-cols-2">
-              {/* Income */}
-              <div className="rounded-xl border border-gray-200 bg-white p-6">
-                <h2 className="mb-6 text-lg font-semibold">Income Breakdown</h2>
-
-                <div className="space-y-4">
-                  <div className="flex justify-between">
-                    <span className="text-gray-500">Cash</span>
-
-                    <span className="font-medium">
-                      AED {report.income.cash.toFixed(2)}
-                    </span>
-                  </div>
-
-                  <div className="flex justify-between">
-                    <span className="text-gray-500">Visa Machine</span>
-
-                    <span className="font-medium">
-                      AED {report.income.visa.toFixed(2)}
-                    </span>
-                  </div>
-
-                  <div className="flex justify-between">
-                    <span className="text-gray-500">Online</span>
-
-                    <span className="font-medium">
-                      AED {report.income.online.toFixed(2)}
-                    </span>
-                  </div>
-
-                  <div className="flex justify-between">
-                    <span className="text-gray-500">Other</span>
-
-                    <span className="font-medium">
-                      AED {report.income.other.toFixed(2)}
-                    </span>
-                  </div>
-
-                  <div className="border-t border-gray-200 pt-4">
-                    <div className="flex justify-between">
-                      <span className="font-semibold">Total Income</span>
-
-                      <span className="font-bold text-[#253d2f]">
-                        AED {report.income.total.toFixed(2)}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Expenses */}
-              <div className="rounded-xl border border-gray-200 bg-white p-6">
-                <h2 className="mb-6 text-lg font-semibold">
-                  Expense Breakdown
-                </h2>
-
-                <div className="space-y-4">
-                  <div className="flex justify-between">
-                    <span className="text-gray-500">General Expenses</span>
-
-                    <span className="font-medium">
-                      AED {report.expenses.general.toFixed(2)}
-                    </span>
-                  </div>
-
-                  <div className="flex justify-between">
-                    <span className="text-gray-500">Flower Purchases</span>
-
-                    <span className="font-medium">
-                      AED {report.expenses.flowerPurchases.toFixed(2)}
-                    </span>
-                  </div>
-
-                  <div className="border-t border-gray-200 pt-4">
-                    <div className="flex justify-between">
-                      <span className="font-semibold">Total Expenses</span>
-
-                      <span className="font-bold text-red-600">
-                        AED {report.expenses.total.toFixed(2)}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              </div>
+              <SummaryCard title="Net profit" amount={formatMoney(netProfit)} />
             </div>
           </div>
-        )}
-      </div>
+
+          <div className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm md:p-6">
+            <h2 className="mb-4 text-lg font-semibold text-gray-900">
+              Income breakdown
+            </h2>
+
+            <div className="divide-y divide-gray-100">
+              <BreakdownRow label="Cash" amount={formatMoney(totalCash)} />
+
+              <BreakdownRow
+                label="Visa machine"
+                amount={formatMoney(totalVisa)}
+              />
+
+              <BreakdownRow label="Online" amount={formatMoney(totalOnline)} />
+
+              <BreakdownRow
+                label="Other income"
+                amount={formatMoney(totalOther)}
+              />
+
+              <BreakdownRow
+                label="Total income"
+                amount={formatMoney(totalIncome)}
+                strong
+              />
+
+              <BreakdownRow
+                label="Flower purchases"
+                amount={formatMoney(totalPurchases)}
+              />
+
+              <BreakdownRow
+                label="Net profit"
+                amount={formatMoney(netProfit)}
+                strong
+              />
+            </div>
+          </div>
+
+          <details className="rounded-xl border border-gray-200 bg-white p-4">
+            <summary className="cursor-pointer text-sm font-medium text-gray-700">
+              View raw report data (for troubleshooting)
+            </summary>
+
+            <pre className="mt-3 overflow-x-auto rounded-lg bg-gray-50 p-3 text-xs text-gray-700">
+              {JSON.stringify(report, null, 2)}
+            </pre>
+          </details>
+        </section>
+      )}
+
+      {!loading && !report && !error && (
+        <div className="rounded-xl border border-dashed border-gray-300 bg-white p-8 text-center">
+          <h2 className="font-semibold text-gray-800">No report generated</h2>
+
+          <p className="mt-2 text-sm text-gray-500">
+            Select your report filters and click Generate Report.
+          </p>
+        </div>
+      )}
     </main>
+  );
+}
+
+function SummaryCard({ title, amount }: { title: string; amount: string }) {
+  return (
+    <div className="rounded-lg border border-gray-200 p-4">
+      <p className="text-sm text-gray-500">{title}</p>
+      <p className="mt-2 break-words text-xl font-bold text-gray-900">
+        {amount}
+      </p>
+    </div>
+  );
+}
+
+function BreakdownRow({
+  label,
+  amount,
+  strong = false,
+}: {
+  label: string;
+  amount: string;
+  strong?: boolean;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-4 py-3">
+      <span
+        className={strong ? "font-semibold text-gray-900" : "text-gray-600"}
+      >
+        {label}
+      </span>
+
+      <span
+        className={
+          strong ? "font-bold text-gray-900" : "font-medium text-gray-800"
+        }
+      >
+        {amount}
+      </span>
+    </div>
   );
 }

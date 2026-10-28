@@ -9,15 +9,18 @@ import { requireAuth, applyBranchAccess } from "@/lib/permissions";
 
 export const dynamic = "force-dynamic";
 
-function isValidDateString(value: string) {
+function isValidDateString(value: string): boolean {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
     return false;
   }
 
-  const date = new Date(`${value}T00:00:00`);
+  const [year, month, day] = value.split("-").map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
 
   return (
-    !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value
+    date.getUTCFullYear() === year &&
+    date.getUTCMonth() === month - 1 &&
+    date.getUTCDate() === day
   );
 }
 
@@ -33,7 +36,6 @@ export async function GET(request: Request) {
     const endDate = searchParams.get("endDate");
     const requestedBranchId = searchParams.get("branchId");
 
-    // Validate required dates.
     if (!startDate || !endDate) {
       return NextResponse.json(
         {
@@ -64,7 +66,6 @@ export async function GET(request: Request) {
       );
     }
 
-    // Validate a supplied branch ID.
     if (
       requestedBranchId &&
       !mongoose.Types.ObjectId.isValid(requestedBranchId)
@@ -78,10 +79,9 @@ export async function GET(request: Request) {
       );
     }
 
-    const start = new Date(`${startDate}T00:00:00`);
-    const end = new Date(`${endDate}T23:59:59.999`);
+    const start = new Date(`${startDate}T00:00:00.000Z`);
+    const end = new Date(`${endDate}T23:59:59.999Z`);
 
-    // Apply server-side branch permissions.
     const branchFilter: Record<string, unknown> = requestedBranchId
       ? { branchId: requestedBranchId }
       : {};
@@ -138,7 +138,6 @@ export async function GET(request: Request) {
     );
 
     const totalExpenses = generalExpenses + flowerPurchaseTotal;
-
     const netProfit = totalIncome - totalExpenses;
 
     return NextResponse.json({
@@ -147,7 +146,6 @@ export async function GET(request: Request) {
         startDate,
         endDate,
         branchId: effectiveBranchId,
-
         income: {
           cash: cashIncome,
           visa: visaIncome,
@@ -155,13 +153,11 @@ export async function GET(request: Request) {
           other: otherIncome,
           total: totalIncome,
         },
-
         expenses: {
           general: generalExpenses,
           flowerPurchases: flowerPurchaseTotal,
           total: totalExpenses,
         },
-
         netProfit,
       },
     });

@@ -189,6 +189,50 @@ export default function DailyEntryPage() {
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
+  async function handleDelete(entry: DailyEntry) {
+    if (userRole === "employee" && entry.branchId._id !== assignedBranchId) {
+      alert("You can only delete entries for your assigned branch.");
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Are you sure you want to delete the daily entry for ${
+        entry.branchId.name
+      } on ${new Date(entry.date).toLocaleDateString()}? This action cannot be undone.`,
+    );
+
+    if (!confirmed) return;
+
+    try {
+      setLoading(true);
+
+      const response = await fetch(`/api/daily-entries/${entry._id}`, {
+        method: "DELETE",
+        cache: "no-store",
+      });
+
+      const result = await response.json();
+
+      if (!response.ok) {
+        alert(result.message || "Failed to delete daily entry.");
+        return;
+      }
+
+      alert("Daily entry deleted successfully.");
+
+      if (editingId === entry._id) {
+        resetForm();
+      }
+
+      await fetchEntries();
+    } catch (error) {
+      console.error("Error deleting daily entry:", error);
+      alert("Something went wrong while deleting the entry.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
@@ -439,6 +483,15 @@ export default function DailyEntryPage() {
                             className="rounded-lg border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50"
                           >
                             Edit
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => handleDelete(entry)}
+                            disabled={loading}
+                            className="rounded-lg border border-red-200 px-3 py-1.5 text-sm font-medium text-red-600 hover:bg-red-50 disabled:opacity-50"
+                          >
+                            Delete
                           </button>
                         </div>
                       </div>

@@ -11,6 +11,7 @@ export const dynamic = "force-dynamic";
 
 const PAYMENT_METHODS = ["cash", "visa", "online", "bank", "other"];
 
+
 interface RouteParams {
   params: Promise<{ id: string }>;
 }
@@ -55,6 +56,63 @@ function parseDate(value: unknown): Date | null {
   }
 
   return date;
+}
+
+export async function DELETE(_request: Request, { params }: RouteParams) {
+  try {
+    const user = await requireWriteAccess();
+    await connectDB();
+
+    const { id } = await params;
+
+    if (!mongoose.isValidObjectId(id)) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: "Invalid flower purchase ID.",
+        },
+        { status: 400 },
+      );
+    }
+
+    if (user.role === "employee" && !user.branchId) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: "Your account is not assigned to a branch.",
+        },
+        { status: 403 },
+      );
+    }
+
+    // Restrict employees to their assigned branch.
+    const purchaseFilter: Record<string, unknown> = { _id: id };
+
+    if (user.role === "employee") {
+      purchaseFilter.branchId = user.branchId;
+    }
+
+    const purchase = await FlowerPurchase.findOne(purchaseFilter);
+
+    if (!purchase) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: "Flower purchase not found or you do not have access.",
+        },
+        { status: 404 },
+      );
+    }
+
+    await FlowerPurchase.deleteOne({ _id: purchase._id });
+
+    return NextResponse.json({
+      success: true,
+      message: "Flower purchase deleted successfully.",
+    });
+  } catch (error) {
+    return errorResponse(error);
+  }
 }
 
 export async function PUT(request: Request, { params }: RouteParams) {

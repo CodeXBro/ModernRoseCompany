@@ -9,6 +9,47 @@ interface RouteParams {
   params: Promise<{ id: string }>;
 }
 
+export async function DELETE(request: Request, { params }: RouteParams) {
+  try {
+    const user = await requireWriteAccess();
+    await connectDB();
+
+    const { id } = await params;
+
+    if (!mongoose.isValidObjectId(id)) {
+      return NextResponse.json(
+        { success: false, message: "Invalid expense ID." },
+        { status: 400 },
+      );
+    }
+
+    // Only allow deleting expenses the user has access to.
+    const filter: Record<string, unknown> = { _id: id };
+    applyBranchAccess(user, filter);
+
+    const expense = await Expense.findOne(filter);
+
+    if (!expense) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: "Expense not found or you do not have access.",
+        },
+        { status: 404 },
+      );
+    }
+
+    await Expense.deleteOne({ _id: expense._id });
+
+    return NextResponse.json({
+      success: true,
+      message: "Expense deleted successfully.",
+    });
+  } catch (error) {
+    return handleError(error);
+  }
+}
+
 const PAYMENT_METHODS = ["cash", "visa", "online", "bank", "other"];
 
 function handleError(error: unknown) {

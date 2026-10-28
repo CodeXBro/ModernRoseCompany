@@ -26,7 +26,6 @@ select {
   font: inherit;
 }
 
-
 @media print {
   body {
     background: white !important;
@@ -48,4 +47,3 @@ select {
     break-inside: avoid;
   }
 }
-

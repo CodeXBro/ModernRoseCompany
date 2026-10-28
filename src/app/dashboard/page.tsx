@@ -107,6 +107,7 @@ export default function DashboardPage() {
   const [branchId, setBranchId] = useState("");
   const [assignedBranchId, setAssignedBranchId] = useState("");
   const [userRole, setUserRole] = useState("");
+  const [userName, setUserName] = useState("");
   const [branchName, setBranchName] = useState("");
   const [sessionLoaded, setSessionLoaded] = useState(false);
   const [branches, setBranches] = useState<Branch[]>([]);
@@ -116,7 +117,7 @@ export default function DashboardPage() {
 
   const periodLabel = getPeriodLabel(date);
 
-  // 1. Verify the logged-in user.
+  // 1. Verify the logged-in user and load their name.
   useEffect(() => {
     let cancelled = false;
 
@@ -141,6 +142,11 @@ export default function DashboardPage() {
 
         const role = session.user.role ?? "";
         const assigned = session.user.branchId ?? "";
+
+        // Show the actual logged-in user's name.
+        setUserName(
+          session.user.name?.trim() || session.user.email?.trim() || "User",
+        );
 
         if (!role) {
           throw new Error("Your account role could not be verified.");
@@ -234,10 +240,10 @@ export default function DashboardPage() {
       try {
         const params = new URLSearchParams();
 
-        // The API must support both modes.
         params.set("mode", date ? "day" : "month");
         params.set("date", date || getUaeDate());
 
+        // Employees can only view their assigned branch.
         if (userRole === "employee") {
           params.set("branchId", assignedBranchId);
         } else if (branchId) {
@@ -275,8 +281,6 @@ export default function DashboardPage() {
           setBranchName("");
         }
 
-        // Use the API's actual payment-method and expense breakdowns.
-        // Do not incorrectly put all branch income under Cash.
         setData(dashboard);
       } catch (err) {
         if (!cancelled) {
@@ -300,7 +304,7 @@ export default function DashboardPage() {
     };
   }, [date, branchId, sessionLoaded, userRole, assignedBranchId]);
 
-  function formatMoney(amount: number) {
+  function formatMoney(amount: number | undefined | null) {
     return `AED ${Number(amount || 0).toFixed(2)}`;
   }
 
@@ -337,9 +341,16 @@ export default function DashboardPage() {
       <div className="mx-auto max-w-7xl">
         <header className="mb-8 flex flex-col justify-between gap-4 md:flex-row md:items-center">
           <div>
-            <h1 className="text-3xl font-bold text-gray-900">
+            {/* Personalized welcome message */}
+            <p className="mb-2 text-sm font-medium text-gray-500">
+              Welcome back,
+            </p>
+
+            <h1 className="text-3xl font-bold text-[#253d2f]">{userName}!</h1>
+
+            <p className="mt-2 text-xl font-semibold text-gray-800">
               {userRole === "employee" ? "Employee Dashboard" : "Dashboard"}
-            </h1>
+            </p>
 
             <p className="mt-1 text-gray-500">
               {userRole === "employee"
@@ -416,7 +427,12 @@ export default function DashboardPage() {
           </div>
         )}
 
-        <section className="grid gap-5 md:grid-cols-3">
+        {/* Summary cards */}
+        <section
+          className={`grid gap-5 ${
+            userRole === "employee" ? "md:grid-cols-2" : "md:grid-cols-3"
+          }`}
+        >
           <SummaryCard
             label="Total Income"
             amount={data?.income.total ?? 0}
@@ -431,14 +447,17 @@ export default function DashboardPage() {
             icon={<Receipt size={22} />}
           />
 
-          <SummaryCard
-            label="Net Profit"
-            amount={data?.netProfit ?? 0}
-            loading={loading}
-            icon={<Wallet size={22} />}
-          />
+          {userRole !== "employee" && (
+            <SummaryCard
+              label="Net Profit"
+              amount={data?.netProfit ?? 0}
+              loading={loading}
+              icon={<Wallet size={22} />}
+            />
+          )}
         </section>
 
+        {/* Income breakdown */}
         <section className="mt-8 rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
           <h2 className="text-xl font-semibold text-gray-900">
             Income Breakdown
@@ -481,6 +500,7 @@ export default function DashboardPage() {
           </div>
         </section>
 
+        {/* Expense breakdown */}
         <section className="mt-8 rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
           <h2 className="text-xl font-semibold text-gray-900">
             Expense Breakdown
@@ -507,6 +527,7 @@ export default function DashboardPage() {
           </div>
         </section>
 
+        {/* Branch performance */}
         <section className="mt-8 rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
           <h2 className="text-xl font-semibold text-gray-900">
             {userRole === "employee"
@@ -541,9 +562,11 @@ export default function DashboardPage() {
                       Expenses
                     </th>
 
-                    <th className="px-4 py-3 text-right text-sm font-semibold text-gray-600">
-                      Profit
-                    </th>
+                    {userRole !== "employee" && (
+                      <th className="px-4 py-3 text-right text-sm font-semibold text-gray-600">
+                        Profit
+                      </th>
+                    )}
                   </tr>
                 </thead>
 
@@ -565,13 +588,17 @@ export default function DashboardPage() {
                         {formatMoney(branch.expenses)}
                       </td>
 
-                      <td
-                        className={`px-4 py-4 text-right font-semibold ${
-                          branch.profit >= 0 ? "text-green-600" : "text-red-600"
-                        }`}
-                      >
-                        {formatMoney(branch.profit)}
-                      </td>
+                      {userRole !== "employee" && (
+                        <td
+                          className={`px-4 py-4 text-right font-semibold ${
+                            branch.profit >= 0
+                              ? "text-green-600"
+                              : "text-red-600"
+                          }`}
+                        >
+                          {formatMoney(branch.profit)}
+                        </td>
+                      )}
                     </tr>
                   ))}
                 </tbody>
@@ -640,3 +667,4 @@ function BreakdownCard({
     </div>
   );
 }
+  

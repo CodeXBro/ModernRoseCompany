@@ -317,11 +317,11 @@ export default function PartnershipSettlementsPage() {
               Finance Management
             </div>
             <h1 className="text-2xl font-bold tracking-tight text-slate-900 sm:text-3xl">
-              Partnership Settlement
+              General Settlement
             </h1>
             <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-500">
-              Record money exchanged between partners separately from shop
-              expenses and flower purchases.
+              Record general settlements separately from shop expenses and
+              flower purchases.
             </p>
           </div>
 
@@ -436,9 +436,7 @@ export default function PartnershipSettlementsPage() {
             <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4 sm:px-6">
               <div>
                 <h2 className="font-semibold text-slate-900">
-                  {editingId
-                    ? "Edit Settlement"
-                    : "Record Partnership Settlement"}
+                  {editingId ? "Edit Settlement" : "Record General Settlement"}
                 </h2>
                 <p className="mt-1 text-xs text-slate-500">
                   Use a clear description so the transaction can be understood

@@ -1,3 +1,4 @@
+
 import { NextResponse } from "next/server";
 import mongoose from "mongoose";
 
@@ -9,16 +10,23 @@ import { requireAuth, applyBranchAccess } from "@/lib/permissions";
 
 export const dynamic = "force-dynamic";
 
-function isValidDateString(value: string) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+function isValidDateString(value: string): boolean {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+
+  if (!match) {
     return false;
   }
 
-  const parsed = new Date(`${value}T00:00:00`);
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+
+  const parsed = new Date(Date.UTC(year, month - 1, day));
 
   return (
-    !Number.isNaN(parsed.getTime()) &&
-    parsed.toISOString().slice(0, 10) === value
+    parsed.getUTCFullYear() === year &&
+    parsed.getUTCMonth() === month - 1 &&
+    parsed.getUTCDate() === day
   );
 }
 
@@ -30,8 +38,8 @@ export async function GET(request: Request) {
 
     const { searchParams } = new URL(request.url);
 
-    const date = searchParams.get("date");
-    const requestedBranchId = searchParams.get("branchId");
+    const date = searchParams.get("date")?.trim();
+    const requestedBranchId = searchParams.get("branchId")?.trim();
 
     if (!date || !isValidDateString(date)) {
       return NextResponse.json(
@@ -56,14 +64,14 @@ export async function GET(request: Request) {
       );
     }
 
-    const startDate = new Date(`${date}T00:00:00`);
-    const endDate = new Date(`${date}T23:59:59.999`);
+    const startDate = new Date(`${date}T00:00:00.000Z`);
+    const endDate = new Date(`${date}T23:59:59.999Z`);
 
-    // Employees must always use their assigned branch.
     const branchFilter: Record<string, unknown> = requestedBranchId
       ? { branchId: requestedBranchId }
       : {};
 
+    // Preserve existing branch access restrictions.
     applyBranchAccess(user, branchFilter);
 
     const effectiveBranchId =
@@ -74,13 +82,8 @@ export async function GET(request: Request) {
       $lte: endDate,
     };
 
-    const [dailyEntries, expenses, flowerPurchases] = await Promise.all([
+    const [dailyEntries, flowerPurchases] = await Promise.all([
       DailyEntry.find({
-        date: dateFilter,
-        ...branchFilter,
-      }).lean(),
-
-      Expense.find({
         date: dateFilter,
         ...branchFilter,
       }).lean(),
@@ -103,21 +106,18 @@ export async function GET(request: Request) {
       otherIncome += Number(entry.income?.other ?? 0);
     }
 
-    const totalIncome = cashIncome + visaIncome + onlineIncome + otherIncome;
+    const totalIncome =
+      cashIncome + visaIncome + onlineIncome + otherIncome;
 
-    const generalExpenses = expenses.reduce(
-      (total, expense) => total + Number(expense.amount ?? 0),
-      0,
-    );
-
+    // Only flower purchases are deducted from income.
+    // General expenses are intentionally excluded.
     const flowerPurchaseTotal = flowerPurchases.reduce(
-      (total, purchase) => total + Number(purchase.totalAmount ?? 0),
+      (total, purchase) =>
+        total + Number(purchase.totalAmount ?? 0),
       0,
     );
 
-    const totalExpenses = generalExpenses + flowerPurchaseTotal;
-
-    const netProfit = totalIncome - totalExpenses;
+    const netProfit = totalIncome - flowerPurchaseTotal;
 
     return NextResponse.json({
       success: true,
@@ -132,9 +132,9 @@ export async function GET(request: Request) {
           total: totalIncome,
         },
         expenses: {
-          general: generalExpenses,
+          general: 0,
           flowerPurchases: flowerPurchaseTotal,
-          total: totalExpenses,
+          total: flowerPurchaseTotal,
         },
         netProfit,
       },
